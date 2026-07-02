@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import fs from 'node:fs'
 import path from 'node:path'
+import relayBootstrapSnapshot from './bootstrap/relay-bootstrap-snapshot.json' with { type: 'json' }
 
 function resolveDatabasePath() {
   const explicitPath = String(process.env.DATABASE_PATH || '').trim()
@@ -165,6 +166,134 @@ db.prepare(`
   VALUES ('default_refresh_interval_minutes', '15', ?)
   ON CONFLICT(key) DO NOTHING
 `).run(new Date().toISOString())
+
+function seedRelayBootstrapSnapshotIfClientsEmpty(snapshot) {
+  const existingClients = db.prepare('SELECT COUNT(*) AS count FROM clients').get().count
+  if (existingClients > 0) return false
+  if (!snapshot || !Array.isArray(snapshot.clients) || snapshot.clients.length === 0) return false
+
+  const insertSetting = db.prepare(`
+    INSERT INTO app_settings (key, value, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `)
+  const insertClient = db.prepare(`
+    INSERT INTO clients (
+      name, slug, enabled, refresh_interval_minutes, use_global_refresh,
+      last_refreshed_at, last_refresh_status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  const insertCategory = db.prepare(`
+    INSERT INTO categories (client_id, name, max_items, sort_order, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `)
+  const insertSource = db.prepare(`
+    INSERT INTO category_sources (
+      category_id, source_type, config_json, enabled, sort_order,
+      created_at, updated_at, last_refresh_at, last_success_at, last_error_at,
+      last_error_message, last_item_count, last_resolved_count, last_skipped_count,
+      last_status, last_refresh_summary_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  const insertArticle = db.prepare(`
+    INSERT INTO articles (
+      client_id, category_id, title, source, url, canonical_url,
+      published_at, discovered_at, summary, discovery_source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+
+  const tx = db.transaction((data) => {
+    db.prepare('DELETE FROM articles').run()
+    db.prepare('DELETE FROM category_sources').run()
+    db.prepare('DELETE FROM categories').run()
+    db.prepare('DELETE FROM clients').run()
+
+    const restoreTime = new Date().toISOString()
+    const clientsWithCachedArticles = new Set((data.articles || []).map((article) => article.client_id))
+
+    for (const row of data.app_settings || []) {
+      if (!row?.key) continue
+      insertSetting.run(row.key, String(row.value ?? ''), row.updated_at || new Date().toISOString())
+    }
+
+    const clientIdMap = new Map()
+    for (const client of data.clients) {
+      const info = insertClient.run(
+        client.name,
+        client.slug,
+        client.enabled ? 1 : 0,
+        client.refresh_interval_minutes ?? 15,
+        client.use_global_refresh ? 1 : 0,
+        clientsWithCachedArticles.has(client.id) ? restoreTime : (client.last_refreshed_at || null),
+        client.last_refresh_status || null,
+        client.created_at || restoreTime,
+        restoreTime,
+      )
+      clientIdMap.set(client.id, Number(info.lastInsertRowid))
+    }
+
+    const categoryIdMap = new Map()
+    for (const category of data.categories || []) {
+      const clientId = clientIdMap.get(category.client_id)
+      if (!clientId) continue
+      const info = insertCategory.run(
+        clientId,
+        category.name,
+        category.max_items ?? 5,
+        category.sort_order ?? 0,
+        category.created_at || new Date().toISOString(),
+        category.updated_at || new Date().toISOString(),
+      )
+      categoryIdMap.set(category.id, Number(info.lastInsertRowid))
+    }
+
+    for (const source of data.category_sources || []) {
+      const categoryId = categoryIdMap.get(source.category_id)
+      if (!categoryId) continue
+      insertSource.run(
+        categoryId,
+        source.source_type,
+        source.config_json,
+        source.enabled ? 1 : 0,
+        source.sort_order ?? 0,
+        source.created_at || new Date().toISOString(),
+        source.updated_at || new Date().toISOString(),
+        source.last_refresh_at || null,
+        source.last_success_at || null,
+        source.last_error_at || null,
+        source.last_error_message || null,
+        source.last_item_count ?? 0,
+        source.last_resolved_count ?? 0,
+        source.last_skipped_count ?? 0,
+        source.last_status || null,
+        source.last_refresh_summary_json || null,
+      )
+    }
+
+    for (const article of data.articles || []) {
+      const clientId = clientIdMap.get(article.client_id)
+      const categoryId = categoryIdMap.get(article.category_id)
+      if (!clientId || !categoryId) continue
+      insertArticle.run(
+        clientId,
+        categoryId,
+        article.title,
+        article.source || null,
+        article.url,
+        article.canonical_url || null,
+        article.published_at || null,
+        article.discovered_at || new Date().toISOString(),
+        article.summary || null,
+        article.discovery_source || null,
+      )
+    }
+  })
+
+  tx(snapshot)
+  return true
+}
+
+seedRelayBootstrapSnapshotIfClientsEmpty(relayBootstrapSnapshot)
 
 const sourceCount = db.prepare('SELECT COUNT(*) AS count FROM category_sources').get().count
 const legacyCount = db.prepare('SELECT COUNT(*) AS count FROM search_queries').get().count
