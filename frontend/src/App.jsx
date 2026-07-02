@@ -287,6 +287,28 @@ function StatCard({ label, value, meta }) {
   )
 }
 
+function DashboardSignalCard({ label, title, meta, stats = [], tone = 'default' }) {
+  return (
+    <section className={`dashboard-signal-card ${tone}`}>
+      <div className="dashboard-signal-head">
+        <div>
+          <div className="section-label">{label}</div>
+          <div className="dashboard-signal-title">{title}</div>
+          {meta ? <div className="dashboard-signal-meta">{meta}</div> : null}
+        </div>
+      </div>
+      <div className="dashboard-signal-stats">
+        {stats.map((item) => (
+          <div className="dashboard-signal-stat" key={item.label}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 export default function App() {
   const [clients, setClients] = useState([])
   const [selectedId, setSelectedId] = useState(null)
@@ -1130,7 +1152,7 @@ export default function App() {
         <header className="topbar">
           <div>
             <div className="breadcrumb">Dashboard</div>
-            <div className="topbar-meta">System health across refresh cadence, cache volume, and feed status.</div>
+            <div className="topbar-meta">Operator view across refresh cadence, source health, and delivery readiness.</div>
           </div>
           <div className="topbar-actions">
             <button className="button button-primary icon-text" type="button" onClick={() => setClientModal(emptyClientForm(settings?.default_refresh_interval_minutes ?? 15))}>
@@ -1140,20 +1162,61 @@ export default function App() {
           </div>
         </header>
 
-        <section className="stats-grid">
-          <StatCard label="Total clients" value={dashboardStats.totalClients} meta={`${dashboardStats.activeFeeds} active`} />
-          <StatCard label="Categories" value={dashboardStats.categoryCount} meta="Across all workspaces" />
-          <StatCard label="Sources" value={dashboardStats.sourceCount} meta="Across Google News, RSS, and future providers" />
-          <StatCard label="Cached articles" value={dashboardStats.cachedArticles} meta="Served from SQLite cache" />
-          <StatCard label="Last refresh" value={formatDate(dashboardStats.lastRefresh)} meta="Most recent feed update" />
-          <StatCard label="Next refresh" value={formatDate(dashboardStats.nextRefresh)} meta="Earliest scheduled run" />
-          <StatCard label="Unhealthy sources" value={dashboardStats.unhealthySources} meta={dashboardStats.unhealthySources ? 'Warning or error state' : 'All enabled sources healthy'} />
-          <StatCard label="Zero-result sources" value={dashboardStats.zeroResultSources} meta={dashboardStats.zeroResultSources ? 'Successful but empty refreshes' : 'No empty source runs'} />
-          <StatCard label="Recent source failures" value={dashboardStats.recentFailedSources} meta={dashboardStats.recentFailedSources ? 'Most recent error states below' : 'No current source failures'} />
+        <section className="surface-card dashboard-hero">
+          <div className="dashboard-hero-copy">
+            <div className="section-label">System brief</div>
+            <h1 className="dashboard-hero-title">Keep every client feed current, clean, and ready to syndicate.</h1>
+            <div className="dashboard-hero-meta">Relay monitors refresh cadence, cache health, and source reliability so you can move directly from exceptions to the workspace that needs attention.</div>
+          </div>
+          <div className="dashboard-hero-aside">
+            <div className="hero-kpi-block">
+              <div className="hero-kpi-label">Active feeds</div>
+              <div className="hero-kpi-value">{dashboardStats.activeFeeds}</div>
+              <div className="hero-kpi-meta">{dashboardStats.totalClients} total clients in rotation</div>
+            </div>
+            <div className="hero-kpi-grid">
+              <StatCard label="Last refresh" value={formatDate(dashboardStats.lastRefresh)} meta="Most recent feed update" />
+              <StatCard label="Next refresh" value={formatDate(dashboardStats.nextRefresh)} meta="Earliest scheduled run" />
+            </div>
+          </div>
+        </section>
+
+        <section className="dashboard-signals-grid">
+          <DashboardSignalCard
+            label="Coverage"
+            title={`${dashboardStats.totalClients} client feeds live in Relay`}
+            meta="A single view of operator coverage across workspaces, categories, and normalized sources."
+            stats={[
+              { label: 'Clients', value: dashboardStats.totalClients },
+              { label: 'Categories', value: dashboardStats.categoryCount },
+              { label: 'Sources', value: dashboardStats.sourceCount },
+            ]}
+          />
+          <DashboardSignalCard
+            label="Cadence"
+            title={`${dashboardStats.cachedArticles} cached articles ready for downstream delivery`}
+            meta="Cache volume stays secondary to freshness. Use the timestamps below to judge whether the network is current enough to publish."
+            stats={[
+              { label: 'Last refresh', value: formatDate(dashboardStats.lastRefresh) },
+              { label: 'Next refresh', value: formatDate(dashboardStats.nextRefresh) },
+              { label: 'Zero-result runs', value: dashboardStats.zeroResultSources },
+            ]}
+          />
+          <DashboardSignalCard
+            label="Exceptions"
+            title={dashboardStats.unhealthySources ? `${dashboardStats.unhealthySources} sources need attention` : 'No active source exceptions'}
+            meta={dashboardStats.unhealthySources ? 'Prioritize failures and degraded sources before they affect downstream feeds.' : 'All enabled sources are currently healthy.'}
+            tone={dashboardStats.unhealthySources ? 'warning' : 'calm'}
+            stats={[
+              { label: 'Unhealthy', value: dashboardStats.unhealthySources },
+              { label: 'Recent failures', value: dashboardStats.recentFailedSources },
+              { label: 'Failed feeds', value: dashboardStats.failedFeeds },
+            ]}
+          />
         </section>
 
         <section className="surface-card dashboard-card">
-          <SectionHeading label="Recently updated clients" title="Latest feed activity" helper="Use this view to confirm freshness and jump directly into a client workspace when something needs attention." />
+          <SectionHeading label="Latest activity" title="Recently updated clients" helper="Start here when a client needs a closer read. Freshness, status, and feed actions stay on one surface." />
           <div className="dashboard-grid activity-grid">
             {dashboardStats.recentlyUpdated.length === 0 ? (
               <EmptyState compact title="No refresh activity yet" body="Run a client refresh to populate the system overview." />
@@ -1175,14 +1238,14 @@ export default function App() {
                 <div className="dashboard-client-note">Last refresh {formatDate(client.lastRefreshedAt)} · Next refresh {formatDate(client.nextRefreshAt)}</div>
                 <div className="dashboard-client-actions">
                   <button className="button button-secondary compact" type="button" onClick={() => handleSelectClient(client.id)}>
-                    Open workspace
+                    Open client
                   </button>
                   <button className="button button-secondary compact" type="button" onClick={() => { setActiveNav('clients'); setClientsView('list') }}>
                     View clients
                   </button>
                   <button className="button button-secondary compact" type="button" onClick={() => copyToClipboard(`${window.location.origin}${client.feedUrl}`, 'RSS URL copied')}>
                     <CopyIcon />
-                    Copy RSS URL
+                    Copy feed
                   </button>
                 </div>
               </div>
@@ -1191,7 +1254,7 @@ export default function App() {
         </section>
 
         <section className="surface-card dashboard-card">
-          <SectionHeading label="Source failures" title="Recently failed sources" helper="These sources most recently returned an error on refresh." />
+          <SectionHeading label="Exceptions" title="Recently failed sources" helper="These source checks most recently returned an error during refresh." />
           {(dashboard.recently_failed_sources || []).length === 0 ? (
             <EmptyState compact title="No recent source failures" body="Failed Google News or RSS sources will appear here after a refresh run." />
           ) : (
