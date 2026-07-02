@@ -1,6 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import path from 'node:path'
+import packageJson from '../package.json' with { type: 'json' }
 import { fileURLToPath } from 'node:url'
 import { timingSafeEqual } from 'node:crypto'
 import {
@@ -37,6 +38,8 @@ const app = express()
 const port = Number(process.env.PORT || 8788)
 const adminPassword = String(process.env.ADMIN_PASSWORD || '')
 const adminAuthEnabled = adminPassword.length > 0
+const buildCommit = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GITHUB_SHA || process.env.COMMIT_SHA || null
+const buildVersion = process.env.APP_VERSION || packageJson.version || null
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const frontendDist = path.join(__dirname, '..', 'frontend', 'dist')
 
@@ -73,7 +76,14 @@ app.use(cors())
 app.use(express.json())
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, port, now: new Date().toISOString(), admin_auth_enabled: adminAuthEnabled })
+  res.json({
+    ok: true,
+    port,
+    now: new Date().toISOString(),
+    admin_auth_enabled: adminAuthEnabled,
+    version: buildVersion,
+    commit: buildCommit,
+  })
 })
 
 app.use((req, res, next) => {
