@@ -53,6 +53,27 @@ function formatRefreshLabel(value) {
   return `Every ${value} minutes`
 }
 
+function getScheduledRefreshIntervalMinutes(value) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0) return null
+  return parsed
+}
+
+function computeNextScheduledRefreshAt(client, now = new Date()) {
+  if (!client?.enabled) return null
+  const intervalMinutes = getScheduledRefreshIntervalMinutes(client.effective_refresh_interval_minutes)
+  if (!intervalMinutes) return null
+
+  const anchor = client.last_refreshed_at ? new Date(client.last_refreshed_at) : new Date(now)
+  if (Number.isNaN(anchor.getTime())) return null
+
+  const nextBoundary = new Date(anchor)
+  nextBoundary.setSeconds(0, 0)
+  const currentMinute = nextBoundary.getMinutes()
+  nextBoundary.setMinutes(currentMinute - (currentMinute % intervalMinutes) + intervalMinutes)
+  return nextBoundary.toISOString()
+}
+
 function formatRecencyLabel(value) {
   if (!value) return 'Past 7 days'
   if (/^when:\d+d$/i.test(value)) {
@@ -334,6 +355,23 @@ export default function App() {
       }
     })()
   }, [])
+
+  useEffect(() => {
+    const refreshSnapshot = async () => {
+      try {
+        await loadClients(selectedId)
+      } catch {
+        // silent background refresh
+      }
+    }
+
+    const intervalId = setInterval(refreshSnapshot, 60 * 1000)
+    window.addEventListener('focus', refreshSnapshot)
+    return () => {
+      clearInterval(intervalId)
+      window.removeEventListener('focus', refreshSnapshot)
+    }
+  }, [selectedId])
 
   async function loadDashboard() {
     const nextDashboard = await api.getDashboard()
@@ -752,11 +790,7 @@ export default function App() {
 
   const dashboardStats = useMemo(() => {
     const totals = clients.reduce((summary, client) => {
-      const isScheduled = client.enabled && client.effective_refresh_interval_minutes !== null && client.effective_refresh_interval_minutes !== undefined
-      const refreshedAt = client.last_refreshed_at ? new Date(client.last_refreshed_at).getTime() : null
-      const nextRefreshAt = isScheduled && refreshedAt
-        ? new Date(refreshedAt + (client.effective_refresh_interval_minutes * 60 * 1000)).toISOString()
-        : null
+      const nextRefreshAt = computeNextScheduledRefreshAt(client)
 
       summary.totalClients += 1
       summary.activeFeeds += client.enabled ? 1 : 0
