@@ -168,9 +168,18 @@ db.prepare(`
 `).run(new Date().toISOString())
 
 function seedRelayBootstrapSnapshotIfClientsEmpty(snapshot) {
-  const existingClients = db.prepare('SELECT COUNT(*) AS count FROM clients').get().count
-  if (existingClients > 0) return false
   if (!snapshot || !Array.isArray(snapshot.clients) || snapshot.clients.length === 0) return false
+
+  const existingClients = db.prepare('SELECT COUNT(*) AS count FROM clients').get().count
+  const snapshotSlugs = snapshot.clients.map((client) => String(client.slug || '').trim()).filter(Boolean)
+  if (snapshotSlugs.length === 0) return false
+
+  const placeholders = snapshotSlugs.map(() => '?').join(', ')
+  const matchingSnapshotClients = db.prepare(`
+    SELECT COUNT(*) AS count FROM clients WHERE slug IN (${placeholders})
+  `).get(...snapshotSlugs).count
+
+  if (existingClients > 0 && matchingSnapshotClients > 0) return false
 
   const insertSetting = db.prepare(`
     INSERT INTO app_settings (key, value, updated_at)
@@ -202,18 +211,20 @@ function seedRelayBootstrapSnapshotIfClientsEmpty(snapshot) {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
 
-  const tx = db.transaction((data) => {
-    db.prepare('DELETE FROM articles').run()
-    db.prepare('DELETE FROM category_sources').run()
-    db.prepare('DELETE FROM categories').run()
-    db.prepare('DELETE FROM clients').run()
+  const tx = db.transaction((data, shouldReplaceExisting) => {
+    if (shouldReplaceExisting) {
+      db.prepare('DELETE FROM articles').run()
+      db.prepare('DELETE FROM category_sources').run()
+      db.prepare('DELETE FROM categories').run()
+      db.prepare('DELETE FROM clients').run()
+    }
 
     const restoreTime = new Date().toISOString()
     const clientsWithCachedArticles = new Set((data.articles || []).map((article) => article.client_id))
 
     for (const row of data.app_settings || []) {
       if (!row?.key) continue
-      insertSetting.run(row.key, String(row.value ?? ''), row.updated_at || new Date().toISOString())
+      insertSetting.run(row.key, String(row.value ?? ''), row.updated_at || restoreTime)
     }
 
     const clientIdMap = new Map()
@@ -241,8 +252,8 @@ function seedRelayBootstrapSnapshotIfClientsEmpty(snapshot) {
         category.name,
         category.max_items ?? 5,
         category.sort_order ?? 0,
-        category.created_at || new Date().toISOString(),
-        category.updated_at || new Date().toISOString(),
+        category.created_at || restoreTime,
+        restoreTime,
       )
       categoryIdMap.set(category.id, Number(info.lastInsertRowid))
     }
@@ -256,8 +267,8 @@ function seedRelayBootstrapSnapshotIfClientsEmpty(snapshot) {
         source.config_json,
         source.enabled ? 1 : 0,
         source.sort_order ?? 0,
-        source.created_at || new Date().toISOString(),
-        source.updated_at || new Date().toISOString(),
+        source.created_at || restoreTime,
+        restoreTime,
         source.last_refresh_at || null,
         source.last_success_at || null,
         source.last_error_at || null,
@@ -282,14 +293,14 @@ function seedRelayBootstrapSnapshotIfClientsEmpty(snapshot) {
         article.url,
         article.canonical_url || null,
         article.published_at || null,
-        article.discovered_at || new Date().toISOString(),
+        article.discovered_at || restoreTime,
         article.summary || null,
         article.discovery_source || null,
       )
     }
   })
 
-  tx(snapshot)
+  tx(snapshot, existingClients === 0)
   return true
 }
 
