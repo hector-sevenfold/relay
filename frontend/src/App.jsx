@@ -1472,7 +1472,7 @@ export default function App() {
     <div className="app-shell dark-theme">
       <aside className="sidebar">
         <div className="brand-row sidebar-brand">
-          <img className="brand-logo" src="/relaylogo.png" alt="Relay" />
+          <img className="brand-logo" src="/relay-logo.svg" alt="Relay" />
         </div>
 
         <div className="sidebar-nav-block">
