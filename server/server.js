@@ -256,12 +256,26 @@ app.get('*', (req, res, next) => {
   res.sendFile(path.join(frontendDist, 'index.html'))
 })
 
-const schedulerIntervalMs = 60 * 1000
-setInterval(() => {
-  refreshDueClients().catch((error) => {
-    console.error('Scheduled refresh failed', error)
-  })
-}, schedulerIntervalMs)
+function millisecondsUntilNextMinuteBoundary(now = new Date()) {
+  const nextMinute = new Date(now)
+  nextMinute.setSeconds(0, 0)
+  nextMinute.setMinutes(nextMinute.getMinutes() + 1)
+  return Math.max(250, nextMinute.getTime() - now.getTime())
+}
+
+function startRefreshScheduler() {
+  const runTick = () => {
+    refreshDueClients(new Date()).catch((error) => {
+      console.error('Scheduled refresh failed', error)
+    }).finally(() => {
+      setTimeout(runTick, millisecondsUntilNextMinuteBoundary())
+    })
+  }
+
+  setTimeout(runTick, millisecondsUntilNextMinuteBoundary())
+}
+
+startRefreshScheduler()
 
 app.listen(port, () => {
   console.log(`RSS feed generator server running on http://127.0.0.1:${port}`)

@@ -1078,14 +1078,22 @@ export async function refreshDueClients(now = new Date()) {
     ORDER BY id
   `).all()
 
-  const nowMs = now.getTime()
+  const alignedNow = new Date(now)
+  alignedNow.setSeconds(0, 0)
   const results = []
 
   for (const client of clients) {
     const intervalMinutes = client.use_global_refresh ? settings.default_refresh_interval_minutes : Number(client.refresh_interval_minutes)
     if (!SCHEDULED_REFRESH_INTERVALS.has(intervalMinutes)) continue
+
+    const currentMinute = alignedNow.getMinutes()
+    if ((currentMinute % intervalMinutes) !== 0) continue
+
+    const scheduledBoundary = new Date(alignedNow)
+    scheduledBoundary.setMinutes(currentMinute - (currentMinute % intervalMinutes))
+
     const lastMs = client.last_refreshed_at ? new Date(client.last_refreshed_at).getTime() : null
-    const due = !lastMs || Number.isNaN(lastMs) || (nowMs - lastMs) >= intervalMinutes * 60 * 1000
+    const due = !lastMs || Number.isNaN(lastMs) || lastMs < scheduledBoundary.getTime()
     if (!due) continue
 
     try {
