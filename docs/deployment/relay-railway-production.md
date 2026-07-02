@@ -105,9 +105,10 @@ Verify after deploy:
 
 Current production model:
 - Relay uses one in-process scheduler inside the web server
-- The scheduler checks every minute
-- Due enabled clients refresh automatically based on each client's configured interval
-- No separate worker or cron service is required for this version
+- the scheduler checks every minute
+- due enabled clients refresh automatically based on each client's configured interval
+- public feed requests also stale-check the requested enabled client and trigger a refresh if that client is due
+- no separate worker or cron service is required for this version
 
 Operational implications:
 - one Railway web service is sufficient

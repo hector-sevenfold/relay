@@ -752,6 +752,52 @@ export function buildRssXmlForClient(slug, baseUrl) {
   return lines.join('')
 }
 
+const inFlightFeedRefreshes = new Map()
+
+function isClientDueForRefresh(client, now = new Date()) {
+  if (!client || !client.enabled) return false
+
+  const settings = getSettings()
+  const intervalMinutes = client.use_global_refresh
+    ? settings.default_refresh_interval_minutes
+    : Number(client.refresh_interval_minutes)
+
+  if (!SCHEDULED_REFRESH_INTERVALS.has(intervalMinutes)) return false
+
+  const alignedNow = new Date(now)
+  alignedNow.setSeconds(0, 0)
+
+  const currentMinute = alignedNow.getMinutes()
+  const scheduledBoundary = new Date(alignedNow)
+  scheduledBoundary.setMinutes(currentMinute - (currentMinute % intervalMinutes))
+
+  const lastMs = client.last_refreshed_at ? new Date(client.last_refreshed_at).getTime() : null
+  return !lastMs || Number.isNaN(lastMs) || lastMs < scheduledBoundary.getTime()
+}
+
+export async function refreshClientIfDueBySlug(slug, now = new Date()) {
+  const client = db.prepare('SELECT * FROM clients WHERE slug = ? AND enabled = 1').get(slug)
+  if (!client) return { ok: false, reason: 'missing' }
+  if (!isClientDueForRefresh(client, now)) {
+    return { ok: true, refreshed: false, clientId: client.id, reason: 'not_due' }
+  }
+
+  const existing = inFlightFeedRefreshes.get(client.id)
+  if (existing) {
+    await existing
+    return { ok: true, refreshed: false, clientId: client.id, reason: 'joined_inflight' }
+  }
+
+  const refreshPromise = refreshClient(client.id)
+    .then(() => ({ ok: true, refreshed: true, clientId: client.id }))
+    .finally(() => {
+      inFlightFeedRefreshes.delete(client.id)
+    })
+
+  inFlightFeedRefreshes.set(client.id, refreshPromise)
+  return await refreshPromise
+}
+
 function escapeXml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')

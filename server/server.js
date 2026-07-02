@@ -23,6 +23,7 @@ import {
   listClientsSummary,
   refreshAllEnabledClients,
   refreshClient,
+  refreshClientIfDueBySlug,
   refreshDueClients,
   resetStarterTemplate,
   saveStarterTemplate,
@@ -252,9 +253,14 @@ app.delete('/api/queries/:id', (req, res) => {
   res.status(204).end()
 })
 
-app.get('/feeds/:slug.xml', (req, res) => {
+app.get('/feeds/:slug.xml', async (req, res) => {
   const protocol = req.headers['x-forwarded-proto'] || req.protocol
   const host = req.headers.host
+  try {
+    await refreshClientIfDueBySlug(req.params.slug, new Date())
+  } catch (error) {
+    console.error(`Feed request refresh failed for ${req.params.slug}`, error)
+  }
   const xml = buildRssXmlForClient(req.params.slug, `${protocol}://${host}`)
   if (!xml) return res.status(404).send('Feed not found')
   res.type('application/rss+xml').send(xml)

@@ -15,6 +15,7 @@ Stack:
 - Protected admin/dashboard UI and admin APIs via `ADMIN_PASSWORD`
 - SQLite persistence
 - 15-minute scheduled refresh while the Node server is running
+- feed-request fallback refresh for stale enabled clients on public RSS reads
 - Manual per-client refresh
 - Source-level refresh and health reporting
 
@@ -161,6 +162,8 @@ After deploy:
 No separate worker is required for this version.
 
 The server runs an in-process scheduler that checks every minute and refreshes due client feeds. Scheduled refreshes continue to run as long as the Node server process is alive.
+
+In addition, public feed requests now perform a stale-check for the requested enabled client and trigger an on-demand refresh when that client is due. This gives Railway deploys a recovery path if the web process restarted or missed a timer boundary.
 
 That means:
 - one web service is enough
