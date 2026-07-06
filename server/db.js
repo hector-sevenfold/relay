@@ -137,6 +137,9 @@ function ensureColumn(table, column, definition) {
 
 ensureColumn('clients', 'refresh_interval_minutes', 'INTEGER NOT NULL DEFAULT 15')
 ensureColumn('clients', 'use_global_refresh', 'INTEGER NOT NULL DEFAULT 0')
+ensureColumn('clients', 'topic_freshness_override', 'TEXT')
+ensureColumn('categories', 'topic_config_json', 'TEXT')
+ensureColumn('categories', 'generated_query', 'TEXT')
 ensureColumn('articles', 'summary', 'TEXT')
 ensureColumn('articles', 'discovery_source', 'TEXT')
 ensureColumn('category_sources', 'last_refresh_at', 'TEXT')
@@ -164,6 +167,12 @@ db.prepare(`
 db.prepare(`
   INSERT INTO app_settings (key, value, updated_at)
   VALUES ('default_refresh_interval_minutes', '15', ?)
+  ON CONFLICT(key) DO NOTHING
+`).run(new Date().toISOString())
+
+db.prepare(`
+  INSERT INTO app_settings (key, value, updated_at)
+  VALUES ('default_topic_freshness', 'when:7d', ?)
   ON CONFLICT(key) DO NOTHING
 `).run(new Date().toISOString())
 

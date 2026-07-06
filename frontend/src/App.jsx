@@ -153,6 +153,82 @@ function makeTemplateCategory(name = '', maxItems = 5) {
   }
 }
 
+function parseSearchTerms(expression = '') {
+  const terms = []
+  const pattern = /"([^"]+)"|(\S+)/g
+  let match
+  while ((match = pattern.exec(expression)) !== null) {
+    const value = String(match[1] || match[2] || '').trim()
+    if (!value || terms.includes(value)) continue
+    terms.push(value)
+  }
+  return terms
+}
+
+function serializeSearchTerms(terms = []) {
+  return terms
+    .map((term) => String(term || '').trim())
+    .filter(Boolean)
+    .map((term) => (term.includes(' ') ? `"${term}"` : term))
+    .join(' ')
+}
+
+const TOPIC_FRESHNESS_OPTIONS = [
+  { value: 'when:1d', label: '24 hours' },
+  { value: 'when:3d', label: '3 days' },
+  { value: 'when:7d', label: '7 days' },
+  { value: 'when:30d', label: '30 days' },
+]
+
+function uniqueChipList(values = []) {
+  const output = []
+  const seen = new Set()
+  for (const value of values) {
+    const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+    if (!normalized) continue
+    const key = normalized.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    output.push(normalized)
+  }
+  return output
+}
+
+function emptyTopicDraft(overrides = {}) {
+  return {
+    name: '',
+    watchFor: [],
+    watchForDraft: '',
+    ignore: [],
+    ignoreDraft: '',
+    preferredPublishers: [],
+    preferredPublishersDraft: '',
+    avoid: [],
+    avoidDraft: '',
+    maxItems: '5',
+    sortOrder: '0',
+    ...overrides,
+  }
+}
+
+function topicDraftFromCategory(category) {
+  const topic = category?.topic_definition || {}
+  return emptyTopicDraft({
+    id: category?.id,
+    name: category?.name || '',
+    watchFor: uniqueChipList(topic.watch_for || []),
+    ignore: uniqueChipList(topic.ignore || []),
+    preferredPublishers: uniqueChipList(topic.preferred_publishers || []),
+    avoid: uniqueChipList(topic.avoid || []),
+    maxItems: String(category?.max_items || 5),
+    sortOrder: String(category?.sort_order || 0),
+  })
+}
+
+function summarizeTopicField(values = [], emptyLabel = 'None') {
+  return values.length ? values.join(' · ') : emptyLabel
+}
+
 function CopyIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -316,6 +392,7 @@ export default function App() {
   const [settings, setSettings] = useState(null)
   const [sourceTypes, setSourceTypes] = useState([])
   const [settingsFormValue, setSettingsFormValue] = useState('15')
+  const [settingsFreshnessValue, setSettingsFreshnessValue] = useState('when:7d')
   const [template, setTemplate] = useState([])
   const [templateDirty, setTemplateDirty] = useState(false)
   const [dashboard, setDashboard] = useState({ total_sources: 0, unhealthy_sources_count: 0, zero_result_source_count: 0, recently_failed_sources: [] })
@@ -333,6 +410,9 @@ export default function App() {
   const [searchModal, setSearchModal] = useState(null)
   const [sourceDebugModal, setSourceDebugModal] = useState(null)
   const [expandedCategories, setExpandedCategories] = useState({})
+  const [topicComposer, setTopicComposer] = useState(null)
+  const [topicEditor, setTopicEditor] = useState(null)
+  const [refreshPanel, setRefreshPanel] = useState(null)
 
   function showToast(message) {
     setToast(message)
@@ -366,6 +446,7 @@ export default function App() {
         setSettings(nextSettings)
         setSourceTypes(nextSourceTypes)
         setSettingsFormValue(String(nextSettings.default_refresh_interval_minutes))
+        setSettingsFreshnessValue(nextSettings.default_topic_freshness || 'when:7d')
         setTemplate(nextTemplate)
         setTemplateDirty(false)
         setDashboard(nextDashboard)
@@ -394,6 +475,36 @@ export default function App() {
       window.removeEventListener('focus', refreshSnapshot)
     }
   }, [selectedId])
+
+  const refreshJobId = refreshPanel?.id || refreshPanel?.jobId
+
+  useEffect(() => {
+    if (!refreshJobId || refreshPanel.status !== 'running') return undefined
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const job = await api.getRefreshJob(refreshJobId)
+        if (cancelled) return
+        setRefreshPanel(job)
+        if (job.status === 'completed') {
+          if (job.client?.id === selectedClient?.id) setSelectedClient(job.client)
+          await loadClients(job.client?.id || selectedId)
+          showToast('Feed preview refreshed')
+        } else if (job.status === 'error') {
+          showError(job.error || 'Refresh failed')
+        }
+      } catch (error) {
+        if (!cancelled) showError(error.message)
+      }
+    }
+
+    poll()
+    const intervalId = setInterval(poll, 1500)
+    return () => {
+      cancelled = true
+      clearInterval(intervalId)
+    }
+  }, [refreshJobId, refreshPanel?.status])
 
   async function loadDashboard() {
     const nextDashboard = await api.getDashboard()
@@ -455,6 +566,9 @@ export default function App() {
         refreshIntervalMinutes: changes.refreshIntervalMinutes === undefined
           ? selectedClient.refresh_interval_minutes
           : changes.refreshIntervalMinutes,
+        topicFreshnessOverride: changes.topicFreshnessOverride === undefined
+          ? selectedClient.topic_freshness_override
+          : changes.topicFreshnessOverride,
       })
       setSelectedClient(result)
       await loadClients(result.id)
@@ -512,28 +626,20 @@ export default function App() {
         enabled: selectedClient.enabled,
         useGlobalRefresh: selectedClient.use_global_refresh,
         refreshIntervalMinutes: selectedClient.refresh_interval_minutes,
+        topicFreshnessOverride: selectedClient.topic_freshness_override,
         useTemplate: false,
       })
 
       for (const category of selectedClient.categories) {
-        const createdCategory = await api.createCategory(duplicate.id, {
-          name: category.name,
-          maxItems: category.max_items,
-        })
-        await api.updateCategory(createdCategory.id, {
+        await api.createCategory(duplicate.id, {
           name: category.name,
           maxItems: category.max_items,
           sortOrder: category.sort_order,
+          watchFor: category.topic_definition?.watch_for || [],
+          ignore: category.topic_definition?.ignore || [],
+          preferredPublishers: category.topic_definition?.preferred_publishers || [],
+          avoid: category.topic_definition?.avoid || [],
         })
-        for (const source of category.sources || []) {
-          await api.createSource(createdCategory.id, {
-            source_type: source.source_type,
-            query: source.query,
-            recency_filter: source.recency_filter,
-            feed_url: source.feed_url,
-            enabled: source.enabled,
-          })
-        }
       }
 
       await loadClients(duplicate.id)
@@ -548,13 +654,64 @@ export default function App() {
   }
 
   async function handleRefreshClient() {
-    if (!selectedClient) return
+    if (!selectedClient || refreshPanel?.status === 'running') return
+    try {
+      const job = await api.startRefreshJob(selectedClient.id)
+      setRefreshPanel(job)
+    } catch (error) {
+      showError(error.message)
+    }
+  }
+
+  function openTopicComposer() {
+    setTopicComposer(emptyTopicDraft({ sortOrder: String(selectedClient?.categories.length ?? 0) }))
+  }
+
+  function updateTopicDraft(setter, field, value) {
+    setter((current) => current ? { ...current, [field]: value } : current)
+  }
+
+  function addTopicChip(setter, listField, draftField) {
+    setter((current) => {
+      if (!current) return current
+      const value = String(current[draftField] || '').trim()
+      if (!value) return current
+      return {
+        ...current,
+        [listField]: uniqueChipList([...(current[listField] || []), value]),
+        [draftField]: '',
+      }
+    })
+  }
+
+  function removeTopicChip(setter, listField, chip) {
+    setter((current) => current ? {
+      ...current,
+      [listField]: (current[listField] || []).filter((entry) => entry !== chip),
+    } : current)
+  }
+
+  function openTopicEditor(category) {
+    setTopicEditor(topicDraftFromCategory(category))
+  }
+
+  async function handleCreateTopic(event) {
+    event.preventDefault()
+    if (!selectedClient || !topicComposer) return
     setSaving(true)
     try {
-      const refreshed = await api.refreshClient(selectedClient.id)
-      setSelectedClient(refreshed)
-      await loadClients(refreshed.id)
-      showToast('Feed refreshed')
+      await api.createCategory(selectedClient.id, {
+        name: topicComposer.name,
+        maxItems: Number(topicComposer.maxItems) || 5,
+        sortOrder: Number(topicComposer.sortOrder) || selectedClient.categories.length,
+        watchFor: topicComposer.watchFor,
+        ignore: topicComposer.ignore,
+        preferredPublishers: topicComposer.preferredPublishers,
+        avoid: topicComposer.avoid,
+      })
+      setTopicComposer(null)
+      await loadClients(selectedClient.id)
+      showToast('Topic added')
     } catch (error) {
       showError(error.message)
     } finally {
@@ -562,44 +719,23 @@ export default function App() {
     }
   }
 
-  function openCategoryModal(category = null) {
-    setCategoryModal(category
-      ? {
-          mode: 'edit',
-          id: category.id,
-          name: category.name,
-          maxItems: String(category.max_items),
-          sortOrder: String(category.sort_order),
-        }
-      : {
-          mode: 'create',
-          name: '',
-          maxItems: '5',
-          sortOrder: String(selectedClient?.categories.length ?? 0),
-        })
-  }
-
-  async function handleSubmitCategory(event) {
+  async function handleSaveTopicEditor(event) {
     event.preventDefault()
-    if (!selectedClient || !categoryModal) return
+    if (!selectedClient || !topicEditor) return
     setSaving(true)
     try {
-      if (categoryModal.mode === 'create') {
-        await api.createCategory(selectedClient.id, {
-          name: categoryModal.name,
-          maxItems: Number(categoryModal.maxItems) || 5,
-        })
-        showToast('Category added')
-      } else {
-        await api.updateCategory(categoryModal.id, {
-          name: categoryModal.name,
-          maxItems: Number(categoryModal.maxItems) || 5,
-          sortOrder: Number(categoryModal.sortOrder) || 0,
-        })
-        showToast('Category saved')
-      }
-      setCategoryModal(null)
+      await api.updateCategory(topicEditor.id, {
+        name: topicEditor.name,
+        maxItems: Number(topicEditor.maxItems) || 5,
+        sortOrder: Number(topicEditor.sortOrder) || 0,
+        watchFor: topicEditor.watchFor,
+        ignore: topicEditor.ignore,
+        preferredPublishers: topicEditor.preferredPublishers,
+        avoid: topicEditor.avoid,
+      })
+      setTopicEditor(null)
       await loadClients(selectedClient.id)
+      showToast('Topic saved')
     } catch (error) {
       showError(error.message)
     } finally {
@@ -608,12 +744,13 @@ export default function App() {
   }
 
   async function handleDeleteCategory(categoryId) {
-    if (!window.confirm('Delete this category and its searches?')) return
+    if (!window.confirm('Delete this topic?')) return
     setSaving(true)
     try {
       await api.deleteCategory(categoryId)
+      if (topicEditor?.id === categoryId) setTopicEditor(null)
       await loadClients(selectedClient.id)
-      showToast('Category deleted')
+      showToast('Topic deleted')
     } catch (error) {
       showError(error.message)
     } finally {
@@ -621,29 +758,47 @@ export default function App() {
     }
   }
 
-  function openSearchModal(categoryId, source = null) {
-    setSearchModal(source
-      ? {
-          mode: 'edit',
-          id: source.id,
-          categoryId,
-          sourceType: source.source_type,
-          query: source.query || '',
-          recencyFilter: source.recency_filter || 'when:7d',
-          feedUrl: source.feed_url || '',
-          enabled: source.enabled,
-          sortOrder: String(source.sort_order ?? 0),
-        }
-      : {
-          mode: 'create',
-          categoryId,
-          sourceType: 'google_news_search',
-          query: '',
-          recencyFilter: 'when:7d',
-          feedUrl: '',
-          enabled: true,
-          sortOrder: String((selectedClient?.categories.find((entry) => entry.id === categoryId)?.sources?.length) ?? 0),
-        })
+  function openCategoryModal(category = null) {
+    if (category) openTopicEditor(category)
+    else openTopicComposer()
+  }
+
+  async function handleSubmitCategory(event) {
+    if (categoryModal?.mode === 'create') return handleCreateTopic(event)
+    if (categoryModal?.mode === 'edit') return handleSaveTopicEditor(event)
+    event.preventDefault()
+  }
+
+  function openSearchModal() {}
+
+  function handleAddSearchTerm() {
+    setSearchModal((current) => {
+      if (!current) return current
+      const value = String(current.queryDraft || '').trim()
+      if (!value) return current
+      if ((current.queryTerms || []).includes(value)) {
+        return { ...current, queryDraft: '' }
+      }
+      const nextTerms = [...(current.queryTerms || []), value]
+      return {
+        ...current,
+        queryTerms: nextTerms,
+        queryDraft: '',
+        query: serializeSearchTerms(nextTerms),
+      }
+    })
+  }
+
+  function handleRemoveSearchTerm(termToRemove) {
+    setSearchModal((current) => {
+      if (!current) return current
+      const nextTerms = (current.queryTerms || []).filter((term) => term !== termToRemove)
+      return {
+        ...current,
+        queryTerms: nextTerms,
+        query: serializeSearchTerms(nextTerms),
+      }
+    })
   }
 
   async function handleSubmitSearch(event) {
@@ -651,11 +806,14 @@ export default function App() {
     if (!selectedClient || !searchModal) return
     setSaving(true)
     try {
+      const normalizedQuery = searchModal.sourceType === 'google_news_search'
+        ? serializeSearchTerms(searchModal.queryTerms || [])
+        : searchModal.query
       const payload = {
         source_type: searchModal.sourceType,
         enabled: searchModal.enabled,
         sortOrder: Number(searchModal.sortOrder) || 0,
-        query: searchModal.query,
+        query: normalizedQuery,
         recency_filter: searchModal.recencyFilter,
         feed_url: searchModal.feedUrl,
       }
@@ -705,9 +863,11 @@ export default function App() {
     try {
       const nextSettings = await api.updateSettings({
         defaultRefreshIntervalMinutes: settingsFormValue === 'manual' ? 'manual' : Number(settingsFormValue),
+        defaultTopicFreshness: settingsFreshnessValue,
       })
       setSettings(nextSettings)
       setSettingsFormValue(String(nextSettings.default_refresh_interval_minutes))
+      setSettingsFreshnessValue(nextSettings.default_topic_freshness || 'when:7d')
       await loadClients(selectedId)
       showToast('Settings saved')
     } catch (error) {
@@ -798,6 +958,43 @@ export default function App() {
     } finally {
       setSavingTemplate(false)
     }
+  }
+
+  function renderTopicChipField(draft, setter, label, listField, draftField, placeholder, helper = null) {
+    return (
+      <label>
+        <span className="field-label">{label}</span>
+        {helper ? <div className="field-help">{helper}</div> : null}
+        <div className="term-composer topic-chip-composer">
+          {(draft[listField] || []).length > 0 ? (
+            <div className="term-chip-list">
+              {draft[listField].map((term) => (
+                <button className="term-chip" key={term} type="button" onClick={() => removeTopicChip(setter, listField, term)}>
+                  <span>{term}</span>
+                  <span aria-hidden="true">×</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="term-chip-empty">None added</div>
+          )}
+          <div className="term-input-row">
+            <input
+              value={draft[draftField] || ''}
+              onChange={(event) => updateTopicDraft(setter, draftField, event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  addTopicChip(setter, listField, draftField)
+                }
+              }}
+              placeholder={placeholder}
+            />
+            <button className="button button-secondary compact" type="button" onClick={() => addTopicChip(setter, listField, draftField)}>Add</button>
+          </div>
+        </div>
+      </label>
+    )
   }
 
   const feedUrl = useMemo(() => {
@@ -896,7 +1093,7 @@ export default function App() {
     if (!selectedClient) {
       return (
         <section className="surface-card empty-panel">
-          <SectionHeading label="Client workspace" title="Choose a client" helper="Open the Clients page to browse, search, and select the feed you want to manage." />
+          <SectionHeading label="Client workspace" title="Choose a client" helper="Open the Clients page to browse, search, and select the workspace you want to edit." />
           <EmptyState title="Nothing selected" body="Pick a client from the Clients page to open its workspace." />
         </section>
       )
@@ -907,106 +1104,45 @@ export default function App() {
         <header className="topbar">
           <div>
             <div className="breadcrumb">Clients <span>›</span> {selectedClient.name}</div>
-            <div className="topbar-meta">Last refresh: {formatDate(selectedClient.last_refreshed_at)}</div>
+            <div className="topbar-meta">Editorial workspace · Last refresh {formatDate(selectedClient.last_refreshed_at)}</div>
           </div>
           <div className="topbar-actions">
             <button className="button button-secondary compact" type="button" onClick={() => setClientsView('list')}>
               All clients
             </button>
+            <button className="button button-secondary compact" type="button" onClick={() => setClientsView('settings')}>
+              Client settings
+            </button>
             <div className="topbar-status">
               <span>Status</span>
               <StatusDot tone={selectedStatusTone} />
             </div>
-            <button className="button button-primary icon-text" type="button" onClick={handleRefreshClient} disabled={saving}>
+            <button className="button button-primary icon-text" type="button" onClick={handleRefreshClient} disabled={refreshPanel?.status === 'running'}>
               <RefreshIcon />
-              {saving ? 'Refreshing…' : 'Refresh now'}
+              {refreshPanel?.status === 'running' ? 'Refreshing…' : 'Refresh feed preview'}
             </button>
           </div>
         </header>
 
-        <div className="workspace-layout">
-          <section className="surface-card overview-card workspace-overview-card">
-            <SectionHeading
-            label="Client overview"
-            title={selectedClient.name}
-            action={(
-              <div className="overview-toolbar">
-                <button className="icon-button" type="button" onClick={handleDuplicateClient} disabled={saving} aria-label="Duplicate client">
-                  <DuplicateIcon />
-                </button>
-                <button className="icon-button danger" type="button" onClick={handleDeleteClient} disabled={saving} aria-label="Delete client">
-                  <TrashIcon />
-                </button>
-              </div>
-            )}
-          />
-
-          <div className="overview-grid refined">
-            <label>
-              <span className="field-label">Client Name</span>
-              <input
-                value={selectedClient.name}
-                onChange={(event) => setSelectedClient((current) => ({ ...current, name: event.target.value }))}
-                onBlur={(event) => persistClient({ name: event.target.value }, 'Client name saved')}
-              />
-            </label>
-
-            <label>
-              <span className="field-label">Slug</span>
-              <input
-                value={selectedClient.slug}
-                onChange={(event) => setSelectedClient((current) => ({ ...current, slug: slugify(event.target.value) }))}
-                onBlur={(event) => persistClient({ slug: event.target.value }, 'Slug saved')}
-              />
-            </label>
-
-            <div className="detail-card quiet">
-              <div>
-                <div className="field-label">Public Feed</div>
-                <div className="field-help">{selectedClient.enabled ? 'Enabled for downstream RSS consumers.' : 'Disabled feeds return no public XML.'}</div>
-              </div>
-              <Switch checked={selectedClient.enabled} onChange={(value) => persistClient({ enabled: value }, 'Feed visibility updated')} disabled={saving} ariaLabel="Toggle public feed" />
+        <section className="surface-card workspace-summary-card compact-monitoring-summary">
+          <div className="workspace-summary-header">
+            <div>
+              <div className="section-label">Monitoring Summary</div>
+              <div className="workspace-summary-title">{selectedClient.name}</div>
             </div>
-
-            <label>
-              <span className="field-label">Refresh Interval</span>
-              <select
-                value={getClientRefreshSelection(selectedClient)}
-                onChange={(event) => {
-                  const value = event.target.value
-                  if (value === 'default') {
-                    setSelectedClient((current) => ({
-                      ...current,
-                      use_global_refresh: true,
-                      effective_refresh_interval_minutes: settings?.default_refresh_interval_minutes ?? 15,
-                    }))
-                    persistClient({ useGlobalRefresh: true, refreshIntervalMinutes: selectedClient.refresh_interval_minutes }, 'Refresh interval updated')
-                    return
-                  }
-
-                  const nextMinutes = value === 'manual' ? null : Number(value)
-                  setSelectedClient((current) => ({
-                    ...current,
-                    use_global_refresh: false,
-                    refresh_interval_minutes: nextMinutes,
-                    effective_refresh_interval_minutes: nextMinutes,
-                  }))
-                  persistClient({ useGlobalRefresh: false, refreshIntervalMinutes: nextMinutes }, 'Refresh interval updated')
-                }}
-              >
-                <option value="default">Use default ({defaultRefreshLabel})</option>
-                {REFRESH_OPTIONS.map((option) => (
-                  <option key={String(option.value)} value={String(option.value)}>{option.label}</option>
-                ))}
-              </select>
-              <span className="field-help">Effective schedule: {selectedClient.effective_refresh_interval_label}</span>
-            </label>
+            <div className="workspace-summary-actions">
+              <button className="icon-button" type="button" onClick={handleDuplicateClient} disabled={saving} aria-label="Duplicate client">
+                <DuplicateIcon />
+              </button>
+              <button className="icon-button danger" type="button" onClick={handleDeleteClient} disabled={saving} aria-label="Delete client">
+                <TrashIcon />
+              </button>
+            </div>
           </div>
-
-          <div className="feed-row">
-            <div className="feed-field">
-              <div className="field-label">RSS URL</div>
-              <div className="copy-row">
+          <div className="compact-summary-grid">
+            <div className="compact-summary-item">
+              <span className="compact-summary-label">Feed</span>
+              <div className="copy-row compact-copy-row">
                 <code>{feedUrl}</code>
                 <button className="button button-secondary icon-text compact" type="button" onClick={handleCopyFeedUrl}>
                   <CopyIcon />
@@ -1014,134 +1150,229 @@ export default function App() {
                 </button>
               </div>
             </div>
+            <div className="compact-summary-meta-list">
+              <div><span>Topics</span><strong>{selectedClient.categories.length}</strong></div>
+              <div><span>Stories cached</span><strong>{selectedClient.preview_groups.reduce((count, group) => count + group.items.length, 0)}</strong></div>
+              <div><span>Freshness</span><strong>{selectedClient.effective_topic_freshness_label || '7 days'}</strong></div>
+              <div><span>Visibility</span><strong>{selectedClient.enabled ? 'Public' : 'Disabled'}</strong></div>
+            </div>
           </div>
-          </section>
+        </section>
 
-          <section className="surface-card categories-card refined workspace-categories-card">
-            <SectionHeading
-            label="Categories & Sources"
-            title="Organize the feed by topic"
-            helper="Each category can combine Google News searches, RSS feeds, and future providers behind one normalized feed." 
-            action={<button className="button button-secondary compact icon-text" type="button" onClick={() => openCategoryModal()}><PlusIcon />Add Category</button>}
+        <section className="surface-card topics-workspace-card">
+          <SectionHeading
+            label="Topics"
+            title="Teach Relay what belongs in the feed"
+            helper="Describe the editorial concepts once. Relay handles the Google News query generation underneath."
+            action={topicComposer ? null : (
+              <button className="button button-secondary compact icon-text" type="button" onClick={openTopicComposer}>
+                <PlusIcon />
+                New Topic
+              </button>
+            )}
           />
 
-          <div className="categories-stack">
+          {topicComposer ? (
+            <form className="topic-inline-composer" onSubmit={handleCreateTopic}>
+              <div className="topic-inline-header">
+                <div>
+                  <div className="field-label">New Topic</div>
+                  <div className="field-help">Inline composer for a new editorial concept.</div>
+                </div>
+                <button className="button button-secondary compact" type="button" onClick={() => setTopicComposer(null)}>Cancel</button>
+              </div>
+              <div className="topic-form-grid">
+                <label>
+                  <span className="field-label">Topic Name</span>
+                  <input value={topicComposer.name} onChange={(event) => updateTopicDraft(setTopicComposer, 'name', event.target.value)} placeholder="Stablecoins" />
+                </label>
+                <label>
+                  <span className="field-label">Maximum Stories</span>
+                  <input type="number" min="1" value={topicComposer.maxItems} onChange={(event) => updateTopicDraft(setTopicComposer, 'maxItems', event.target.value)} />
+                </label>
+                {renderTopicChipField(topicComposer, setTopicComposer, 'Watch for', 'watchFor', 'watchForDraft', 'Add a company, phrase, or concept', 'This is the strongest signal. Start with the stories that belong here.')}
+                {renderTopicChipField(topicComposer, setTopicComposer, 'Ignore', 'ignore', 'ignoreDraft', 'Add terms to exclude')}
+                {renderTopicChipField(topicComposer, setTopicComposer, 'Preferred publishers', 'preferredPublishers', 'preferredPublishersDraft', 'Add a publisher to prioritize')}
+                {renderTopicChipField(topicComposer, setTopicComposer, 'Avoid', 'avoid', 'avoidDraft', 'Add a publisher to avoid')}
+              </div>
+              <div className="modal-actions">
+                <button className="button button-secondary" type="button" onClick={() => setTopicComposer(null)}>Cancel</button>
+                <button className="button button-primary" type="submit" disabled={saving}>Save Topic</button>
+              </div>
+            </form>
+          ) : null}
+
+          <div className="topic-card-list">
             {selectedClient.categories.length === 0 ? (
-              <EmptyState title="No categories yet" body="Add a category to start structuring this client feed." />
-            ) : (
-              selectedClient.categories.map((category) => {
-                const expanded = Boolean(expandedCategories[category.id])
-                const previewGroup = previewGroupMap[category.id]
-                return (
-                  <article className="category-panel" key={category.id}>
-                    <button
-                      className="category-header"
-                      type="button"
-                      onClick={() => setExpandedCategories((current) => ({ ...current, [category.id]: !expanded }))}
-                    >
-                      <div className="category-header-main">
-                        <div className="category-header-title">{category.name}</div>
-                        <div className="category-header-summary">
-                          <span>{category.sources.length} sources</span>
-                          <span>Max {category.max_items}</span>
-                          <span>{previewGroup?.last_updated_at ? `Updated ${formatDate(previewGroup.last_updated_at)}` : 'No cached items yet'}</span>
-                        </div>
+              <EmptyState title="No topics yet" body="Add the first topic to start shaping the editorial feed." />
+            ) : selectedClient.categories.map((category) => {
+              const previewGroup = previewGroupMap[category.id]
+              return (
+                <article className="topic-card" key={category.id}>
+                  <button className="topic-card-main" type="button" onClick={() => openTopicEditor(category)}>
+                    <div className="topic-card-topline">
+                      <div>
+                        <div className="topic-card-title">{category.name}</div>
+                        <div className="topic-card-meta">Max {category.max_items} · {previewGroup?.items?.length || 0} preview stories</div>
                       </div>
-                      <ChevronIcon expanded={expanded} />
-                    </button>
-
-                    {expanded ? (
-                      <div className="category-body category-body-grid">
-                        <div className="category-panel-column">
-                          <div className="category-toolbar">
-                            <button className="button button-secondary compact" type="button" onClick={() => openSearchModal(category.id)}>
-                              Add Source
-                            </button>
-                            <button className="button button-secondary compact" type="button" onClick={() => openCategoryModal(category)}>
-                              Edit Category
-                            </button>
-                            <button className="button button-danger-outline compact" type="button" onClick={() => handleDeleteCategory(category.id)}>
-                              Delete Category
-                            </button>
-                          </div>
-
-                          {category.sources.length === 0 ? (
-                            <EmptyState compact title="No sources yet" body="Add a Google News search or RSS feed for this category." />
-                          ) : (
-                            <div className="search-table-wrap">
-                              <div className="search-table-header search-table-row search-table-row-health">
-                                <div>Source</div>
-                                <div>Health</div>
-                                <div>Last refreshed</div>
-                                <div>Items found</div>
-                                <div>Last error</div>
-                                <div>Actions</div>
-                              </div>
-                              {category.sources.map((source) => (
-                                <div className={`search-table-row search-table-row-health ${source.enabled ? '' : 'disabled'}`} key={source.id}>
-                                  <div className="source-cell-stack">
-                                    <div className="search-primary"><span className="search-expression">{formatSourceTypeLabel(source.source_type, sourceTypes)}</span></div>
-                                    <div className="search-secondary">{formatSourceConfig(source)}</div>
-                                  </div>
-                                  <div className="source-health-cell">
-                                    <StatusDot tone={getStatusTone(source.status || (source.enabled ? null : 'disabled'))} />
-                                    <span>{formatSourceStatusLabel(source.status || (source.enabled ? null : 'disabled'))}</span>
-                                  </div>
-                                  <div className="search-secondary">{formatDate(source.last_refresh_at)}</div>
-                                  <div className="source-count-cell">
-                                    <div>{source.last_item_count || 0} found</div>
-                                    <div className="micro-copy">{source.last_resolved_count || 0} resolved · {source.last_skipped_count || 0} skipped</div>
-                                  </div>
-                                  <div className="source-error-cell">{source.last_error_message || '—'}</div>
-                                  <div className="source-actions-cell">
-                                    <button className="link-button" type="button" onClick={() => setSourceDebugModal({ source, categoryName: category.name, clientName: selectedClient.name })}>Details</button>
-                                    <button className="link-button" type="button" onClick={() => openSearchModal(category.id, source)}>Edit</button>
-                                    <button className="link-button danger" type="button" onClick={() => handleDeleteSearch(source.id)}>Delete</button>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="category-preview-block">
-                          <div className="category-preview-header">
-                            <div>
-                              <div className="field-label">Feed Preview</div>
-                              <div className="category-preview-meta">Last updated {formatDate(previewGroup?.last_updated_at)}</div>
-                            </div>
-                          </div>
-
-                          {!previewGroup || previewGroup.items.length === 0 ? (
-                            <EmptyState compact title="No preview items yet" body="Refresh this client to cache and preview articles for this category." />
-                          ) : (
-                            <div className="category-preview-list">
-                              {previewGroup.items.map((item) => (
-                                <div className="preview-item" key={item.id}>
-                                  <div className="preview-item-row">
-                                    <div className="preview-headline">{item.title}</div>
-                                  </div>
-                                  <div className="preview-meta-row">
-                                    <span>{item.source || 'Unknown Source'}</span>
-                                    <span>{formatDate(item.published_at)}</span>
-                                    <a href={item.canonical_url || item.url} target="_blank" rel="noopener noreferrer" className="external-link">
-                                      Open article
-                                    </a>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ) : null}
-                  </article>
-                )
-              })
-            )}
+                      <span className="topic-card-edit-link">Edit</span>
+                    </div>
+                    <div className="topic-card-grid">
+                      <div><span>Watch for</span><strong>{summarizeTopicField(category.topic_definition?.watch_for || [], 'Add editorial signals')}</strong></div>
+                      <div><span>Ignore</span><strong>{summarizeTopicField(category.topic_definition?.ignore || [])}</strong></div>
+                      <div><span>Preferred publishers</span><strong>{summarizeTopicField(category.topic_definition?.preferred_publishers || [])}</strong></div>
+                      <div><span>Avoid</span><strong>{summarizeTopicField(category.topic_definition?.avoid || [])}</strong></div>
+                    </div>
+                  </button>
+                </article>
+              )
+            })}
           </div>
-          </section>
-        </div>
+        </section>
+
+        <section className="surface-card workspace-feed-preview-card">
+          <SectionHeading
+            label="Feed Preview"
+            title="Review the stories Relay would surface right now"
+            helper="Feed Preview stays below Topics so you can adjust editorial rules, refresh, and inspect results without leaving the page."
+          />
+          <div className="workspace-preview-groups">
+            {selectedClient.preview_groups.length === 0 ? (
+              <EmptyState compact title="No preview stories yet" body="Refresh the client to cache stories for each topic." />
+            ) : selectedClient.preview_groups.map((group) => (
+              <article className="preview-topic-group" key={group.id}>
+                <div className="preview-topic-group-header">
+                  <div>
+                    <div className="preview-topic-group-title">{group.name}</div>
+                    <div className="preview-topic-group-meta">Updated {formatDate(group.last_updated_at)} · {group.items.length} stories</div>
+                  </div>
+                </div>
+                {group.items.length === 0 ? (
+                  <EmptyState compact title="No stories in preview" body="Adjust the topic and refresh to fetch a better set of stories." />
+                ) : (
+                  <div className="category-preview-list workspace-preview-list">
+                    {group.items.map((item) => (
+                      <div className="preview-item" key={item.id}>
+                        <div className="preview-item-row">
+                          <div className="preview-headline">{item.title}</div>
+                        </div>
+                        <div className="preview-meta-row">
+                          <span>{item.source || 'Unknown Source'}</span>
+                          <span>{formatDate(item.published_at)}</span>
+                          <a href={item.canonical_url || item.url} target="_blank" rel="noopener noreferrer" className="external-link">
+                            Open article
+                          </a>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
+        </section>
+      </>
+    )
+  }
+
+  function renderClientSettings() {
+    if (!selectedClient) return renderClientsPage()
+
+    return (
+      <>
+        <header className="topbar">
+          <div>
+            <div className="breadcrumb">Clients <span>›</span> {selectedClient.name} <span>›</span> Settings</div>
+            <div className="topbar-meta">Low-frequency client controls live here so Topics and Feed Preview can stay focused.</div>
+          </div>
+          <div className="topbar-actions">
+            <button className="button button-secondary compact" type="button" onClick={() => setClientsView('workspace')}>
+              Back to workspace
+            </button>
+          </div>
+        </header>
+
+        <section className="settings-grid client-settings-grid">
+          <div className="surface-card settings-card">
+            <SectionHeading label="Client" title="Identity and delivery" helper="These settings affect the feed as a whole rather than any single topic." />
+            <div className="settings-form-stack">
+              <label>
+                <span className="field-label">Client Name</span>
+                <input value={selectedClient.name} onChange={(event) => setSelectedClient((current) => ({ ...current, name: event.target.value }))} onBlur={(event) => persistClient({ name: event.target.value }, 'Client name saved')} />
+              </label>
+              <label>
+                <span className="field-label">Slug</span>
+                <input value={selectedClient.slug} onChange={(event) => setSelectedClient((current) => ({ ...current, slug: slugify(event.target.value) }))} onBlur={(event) => persistClient({ slug: event.target.value }, 'Slug saved')} />
+              </label>
+              <div className="detail-card quiet">
+                <div>
+                  <div className="field-label">Public Feed</div>
+                  <div className="field-help">{selectedClient.enabled ? 'Enabled for downstream RSS consumers.' : 'Disabled feeds return no public XML.'}</div>
+                </div>
+                <Switch checked={selectedClient.enabled} onChange={(value) => persistClient({ enabled: value }, 'Feed visibility updated')} disabled={saving} ariaLabel="Toggle public feed" />
+              </div>
+            </div>
+          </div>
+
+          <div className="surface-card settings-card">
+            <SectionHeading label="Freshness" title="Client freshness override" helper="Use the global default, or tighten/loosen this client without changing the editorial topic model." />
+            <div className="settings-form-stack">
+              <label>
+                <span className="field-label">Freshness window</span>
+                <select
+                  value={selectedClient.topic_freshness_override || 'default'}
+                  onChange={(event) => {
+                    const value = event.target.value
+                    const nextValue = value === 'default' ? null : value
+                    setSelectedClient((current) => ({
+                      ...current,
+                      topic_freshness_override: nextValue,
+                      effective_topic_freshness_label: TOPIC_FRESHNESS_OPTIONS.find((option) => option.value === (nextValue || settings?.default_topic_freshness))?.label || current.effective_topic_freshness_label,
+                    }))
+                    persistClient({ topicFreshnessOverride: nextValue }, 'Client freshness updated')
+                  }}
+                >
+                  <option value="default">Use global default ({settings?.default_topic_freshness_label || '7 days'})</option>
+                  {TOPIC_FRESHNESS_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span className="field-label">Refresh interval</span>
+                <select
+                  value={getClientRefreshSelection(selectedClient)}
+                  onChange={(event) => {
+                    const value = event.target.value
+                    if (value === 'default') {
+                      setSelectedClient((current) => ({
+                        ...current,
+                        use_global_refresh: true,
+                        effective_refresh_interval_minutes: settings?.default_refresh_interval_minutes ?? 15,
+                      }))
+                      persistClient({ useGlobalRefresh: true, refreshIntervalMinutes: selectedClient.refresh_interval_minutes }, 'Refresh interval updated')
+                      return
+                    }
+                    const nextMinutes = value === 'manual' ? null : Number(value)
+                    setSelectedClient((current) => ({
+                      ...current,
+                      use_global_refresh: false,
+                      refresh_interval_minutes: nextMinutes,
+                      effective_refresh_interval_minutes: nextMinutes,
+                    }))
+                    persistClient({ useGlobalRefresh: false, refreshIntervalMinutes: nextMinutes }, 'Refresh interval updated')
+                  }}
+                >
+                  <option value="default">Use default ({defaultRefreshLabel})</option>
+                  {REFRESH_OPTIONS.map((option) => (
+                    <option key={String(option.value)} value={String(option.value)}>{option.label}</option>
+                  ))}
+                </select>
+                <span className="field-help">Effective schedule: {selectedClient.effective_refresh_interval_label}</span>
+              </label>
+            </div>
+          </div>
+        </section>
       </>
     )
   }
@@ -1455,12 +1686,26 @@ export default function App() {
             </div>
           </div>
 
+          <div className="surface-card settings-card">
+            <SectionHeading label="Editorial model" title="Default freshness window" helper="Relay applies this freshness window when it generates Google News queries internally. Clients can optionally override it in Client Settings." />
+            <div className="settings-form-row">
+              <label>
+                <span className="field-label">Global Default</span>
+                <select value={settingsFreshnessValue} onChange={(event) => setSettingsFreshnessValue(event.target.value)}>
+                  {TOPIC_FRESHNESS_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
+
           <div className="surface-card settings-note-card">
             <SectionHeading label="Behavior" title="Client overrides" />
             <div className="settings-note-list">
-              <div className="settings-note-item">Default: every 15 minutes unless changed here.</div>
-              <div className="settings-note-item">Client override options: 5, 10, 15, 30, 60, or Manual.</div>
-              <div className="settings-note-item">Manual disables scheduled refresh for that client.</div>
+              <div className="settings-note-item">Topic authors think in editorial concepts only. Relay owns the Google News query generation internally.</div>
+              <div className="settings-note-item">Client freshness override options: 24 hours, 3 days, 7 days, or 30 days.</div>
+              <div className="settings-note-item">Refresh cadence remains separate from topic authoring.</div>
             </div>
           </div>
         </section>
@@ -1494,7 +1739,9 @@ export default function App() {
                 ? renderDashboard()
                 : clientsView === 'workspace'
                   ? renderWorkspace()
-                  : renderClientsPage()}
+                  : clientsView === 'settings'
+                    ? renderClientSettings()
+                    : renderClientsPage()}
         </div>
       </main>
 
@@ -1547,79 +1794,71 @@ export default function App() {
         </Modal>
       ) : null}
 
-      {categoryModal ? (
-        <Modal title={categoryModal.mode === 'create' ? 'Add category' : 'Edit category'} subtitle="Group related sources together for this client feed." onClose={() => setCategoryModal(null)}>
-          <form className="modal-form" onSubmit={handleSubmitCategory}>
-            <label>
-              <span className="field-label">Category Name</span>
-              <input value={categoryModal.name} onChange={(event) => setCategoryModal((current) => ({ ...current, name: event.target.value }))} />
-            </label>
-            <div className="modal-grid-two">
-              <label>
-                <span className="field-label">Max Items</span>
-                <input type="number" min="1" value={categoryModal.maxItems} onChange={(event) => setCategoryModal((current) => ({ ...current, maxItems: event.target.value }))} />
-              </label>
-              <label>
-                <span className="field-label">Sort Order</span>
-                <input type="number" min="0" value={categoryModal.sortOrder} onChange={(event) => setCategoryModal((current) => ({ ...current, sortOrder: event.target.value }))} />
-              </label>
-            </div>
-            <div className="modal-actions">
-              <button className="button button-secondary" type="button" onClick={() => setCategoryModal(null)}>Cancel</button>
-              <button className="button button-primary" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save Category'}</button>
-            </div>
-          </form>
-        </Modal>
-      ) : null}
-
-      {searchModal ? (
-        <Modal title={searchModal.mode === 'create' ? 'Add source' : 'Edit source'} subtitle="Connect this category to one or more normalized discovery providers." onClose={() => setSearchModal(null)}>
-          <form className="modal-form" onSubmit={handleSubmitSearch}>
-            <label>
-              <span className="field-label">Source Type</span>
-              <select value={searchModal.sourceType} onChange={(event) => setSearchModal((current) => ({ ...current, sourceType: event.target.value }))}>
-                {sourceTypes.map((sourceType) => (
-                  <option key={sourceType.type} value={sourceType.type}>{sourceType.label}</option>
-                ))}
-              </select>
-            </label>
-            {searchModal.sourceType === 'google_news_search' ? (
-              <>
-                <label>
-                  <span className="field-label">Search Expression</span>
-                  <input value={searchModal.query} onChange={(event) => setSearchModal((current) => ({ ...current, query: event.target.value }))} />
-                </label>
-                <label>
-                  <span className="field-label">Recency</span>
-                  <input value={searchModal.recencyFilter} onChange={(event) => setSearchModal((current) => ({ ...current, recencyFilter: event.target.value }))} />
-                </label>
-              </>
-            ) : (
-              <label>
-                <span className="field-label">Feed URL</span>
-                <input value={searchModal.feedUrl} onChange={(event) => setSearchModal((current) => ({ ...current, feedUrl: event.target.value }))} placeholder="https://example.com/feed.xml" />
-              </label>
-            )}
-            <label>
-              <span className="field-label">Sort Order</span>
-              <input type="number" min="0" value={searchModal.sortOrder} onChange={(event) => setSearchModal((current) => ({ ...current, sortOrder: event.target.value }))} />
-            </label>
-            <div className="modal-switch-row">
+      {topicEditor ? (
+        <div className="slideover-backdrop" onClick={() => setTopicEditor(null)}>
+          <aside className="slideover-panel" onClick={(event) => event.stopPropagation()}>
+            <div className="slideover-header">
               <div>
-                <div className="field-label">Source Enabled</div>
-                <div className="field-help">Enabled sources participate in scheduled and manual refreshes.</div>
+                <div className="section-label">Edit Topic</div>
+                <div className="slideover-title">{topicEditor.name || 'Untitled topic'}</div>
               </div>
-              <Switch checked={searchModal.enabled} onChange={(value) => setSearchModal((current) => ({ ...current, enabled: value }))} ariaLabel="Toggle source enabled" />
+              <button className="icon-button" type="button" onClick={() => setTopicEditor(null)} aria-label="Close topic editor">×</button>
             </div>
-            <div className="modal-actions">
-              <button className="button button-secondary" type="button" onClick={() => setSearchModal(null)}>Cancel</button>
-              <button className="button button-primary" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save Source'}</button>
-            </div>
-          </form>
-        </Modal>
+            <form className="modal-form slideover-form" onSubmit={handleSaveTopicEditor}>
+              <label>
+                <span className="field-label">Topic Name</span>
+                <input value={topicEditor.name} onChange={(event) => updateTopicDraft(setTopicEditor, 'name', event.target.value)} />
+              </label>
+              <label>
+                <span className="field-label">Maximum Stories</span>
+                <input type="number" min="1" value={topicEditor.maxItems} onChange={(event) => updateTopicDraft(setTopicEditor, 'maxItems', event.target.value)} />
+              </label>
+              {renderTopicChipField(topicEditor, setTopicEditor, 'Watch for', 'watchFor', 'watchForDraft', 'Add a company, phrase, or concept')}
+              {renderTopicChipField(topicEditor, setTopicEditor, 'Ignore', 'ignore', 'ignoreDraft', 'Add terms to exclude')}
+              {renderTopicChipField(topicEditor, setTopicEditor, 'Preferred publishers', 'preferredPublishers', 'preferredPublishersDraft', 'Add a publisher to prioritize')}
+              {renderTopicChipField(topicEditor, setTopicEditor, 'Avoid', 'avoid', 'avoidDraft', 'Add a publisher to avoid')}
+              <div className="slideover-footer">
+                <button className="button button-danger-outline" type="button" onClick={() => handleDeleteCategory(topicEditor.id)}>Delete Topic</button>
+                <div className="slideover-footer-actions">
+                  <button className="button button-secondary" type="button" onClick={() => setTopicEditor(null)}>Cancel</button>
+                  <button className="button button-primary" type="submit" disabled={saving}>Save Topic</button>
+                </div>
+              </div>
+            </form>
+          </aside>
+        </div>
       ) : null}
 
-
+      {refreshPanel ? (
+        <div className="refresh-progress-panel">
+          <div className="refresh-progress-header">
+            <div>
+              <div className="section-label">Refresh</div>
+              <div className="refresh-progress-title">{refreshPanel.client_name || selectedClient?.name || 'Client refresh'}</div>
+            </div>
+            {refreshPanel.status !== 'running' ? <button className="icon-button" type="button" onClick={() => setRefreshPanel(null)} aria-label="Dismiss refresh panel">×</button> : null}
+          </div>
+          <div className="refresh-progress-meta">{refreshPanel.status === 'running' ? 'Refreshing feed preview…' : refreshPanel.status === 'completed' ? 'Refresh complete' : 'Refresh failed'}</div>
+          <div className="refresh-progress-list">
+            {(refreshPanel.topics || []).map((topic) => (
+              <div className="refresh-progress-row" key={topic.id}>
+                <div>
+                  <div className="refresh-progress-topic">{topic.name}</div>
+                  <div className="refresh-progress-stats">
+                    {topic.status === 'completed'
+                      ? `${topic.emitted_count || 0} added · ${topic.duplicate_count || 0} duplicates removed · ${topic.ignored_count || 0} ignored`
+                      : topic.status === 'running'
+                        ? 'Refreshing…'
+                        : 'Queued'}
+                  </div>
+                </div>
+                <span className={`refresh-progress-state ${topic.status}`}>{topic.status}</span>
+              </div>
+            ))}
+          </div>
+          {refreshPanel.error ? <div className="source-error-inline">{refreshPanel.error}</div> : null}
+        </div>
+      ) : null}
       {sourceDebugModal ? (
         <Modal
           wide

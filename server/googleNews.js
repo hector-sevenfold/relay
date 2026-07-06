@@ -563,13 +563,30 @@ async function fetchPublisherTarget(candidateUrl, trace, resolutionMethod) {
       contentType,
     })
 
+    if (!response.ok) {
+      await response.body?.cancel?.()
+      addTraceStep(trace, 'publisher_target_invalid', {
+        resolutionMethod,
+        candidateUrl: normalizedCandidate,
+        landedUrl,
+        reason: `http_status_${response.status}`,
+      })
+      return null
+    }
+
     if (!isPublisherUrl(landedUrl)) {
       await response.body?.cancel?.()
+      addTraceStep(trace, 'publisher_target_invalid', {
+        resolutionMethod,
+        candidateUrl: normalizedCandidate,
+        landedUrl,
+        reason: 'landed_on_non_publisher_url',
+      })
       return null
     }
 
     let canonicalUrl = null
-    if (response.ok && /text\/html|application\/xhtml\+xml/i.test(contentType)) {
+    if (/text\/html|application\/xhtml\+xml/i.test(contentType)) {
       const html = await response.text()
       canonicalUrl = extractCanonicalFromHtml(html, landedUrl)
       addTraceStep(trace, 'publisher_canonical_lookup', {
@@ -578,13 +595,36 @@ async function fetchPublisherTarget(candidateUrl, trace, resolutionMethod) {
         canonicalUrl,
         usedCanonicalMeta: Boolean(canonicalUrl),
       })
+
+      const loweredHtml = html.toLowerCase()
+      if (loweredHtml.includes('captcha') || loweredHtml.includes('access denied') || loweredHtml.includes('enable javascript and cookies to continue')) {
+        addTraceStep(trace, 'publisher_target_invalid', {
+          resolutionMethod,
+          candidateUrl: normalizedCandidate,
+          landedUrl,
+          reason: 'publisher_block_page',
+        })
+        return null
+      }
     } else {
       await response.body?.cancel?.()
     }
 
+    const normalizedCanonical = stripTrackingParams(canonicalUrl || landedUrl)
+    if (!isPublisherUrl(normalizedCanonical)) {
+      addTraceStep(trace, 'publisher_target_invalid', {
+        resolutionMethod,
+        candidateUrl: normalizedCandidate,
+        landedUrl,
+        canonicalUrl: normalizedCanonical,
+        reason: 'canonical_not_publisher_url',
+      })
+      return null
+    }
+
     const result = {
       resolvedUrl: landedUrl,
-      canonicalUrl: stripTrackingParams(canonicalUrl || landedUrl),
+      canonicalUrl: normalizedCanonical,
     }
     publisherFetchCache.set(normalizedCandidate, result)
     return result
@@ -594,18 +634,6 @@ async function fetchPublisherTarget(candidateUrl, trace, resolutionMethod) {
       candidateUrl: normalizedCandidate,
       error: error.message,
     })
-    if (isPublisherUrl(normalizedCandidate)) {
-      addTraceStep(trace, 'publisher_target_error_fallback_candidate', {
-        resolutionMethod,
-        candidateUrl: normalizedCandidate,
-      })
-      const fallback = {
-        resolvedUrl: normalizedCandidate,
-        canonicalUrl: normalizedCandidate,
-      }
-      publisherFetchCache.set(normalizedCandidate, fallback)
-      return fallback
-    }
     return null
   }
 }
@@ -958,7 +986,9 @@ async function resolveOriginalArticleUrl({ googleNewsUrl, title, source, sourceU
   })
 
   const direct = extractEmbeddedPublisherUrl(googleNewsUrl)
+  let directAttempted = null
   if (direct) {
+    directAttempted = direct
     const resolved = await fetchPublisherTarget(direct, trace, 'google_query_param')
     if (resolved) {
       const finished = finishResolved(trace, {
@@ -975,21 +1005,28 @@ async function resolveOriginalArticleUrl({ googleNewsUrl, title, source, sourceU
   const decoded = await decodeGoogleNewsUrl(googleNewsUrl, trace)
   if (decoded.decodedUrl) {
     trace.decodedUrl = decoded.decodedUrl
-    const resolved = await fetchPublisherTarget(decoded.decodedUrl, trace, decoded.method)
-    if (resolved) {
-      const finished = finishResolved(trace, {
+    if (directAttempted && stripTrackingParams(decoded.decodedUrl) === stripTrackingParams(directAttempted)) {
+      addTraceStep(trace, 'decoded_url_already_validated', {
         decodedUrl: decoded.decodedUrl,
-        resolvedUrl: resolved.resolvedUrl,
-        canonicalUrl: resolved.canonicalUrl,
-        resolutionMethod: resolved.canonicalUrl !== resolved.resolvedUrl ? `${decoded.method}:canonical_meta` : `${decoded.method}:landed_url`,
+        resolutionMethod: decoded.method,
       })
-      resolutionCache.set(googleNewsUrl, structuredClone(finished))
-      return finished
+    } else {
+      const resolved = await fetchPublisherTarget(decoded.decodedUrl, trace, decoded.method)
+      if (resolved) {
+        const finished = finishResolved(trace, {
+          decodedUrl: decoded.decodedUrl,
+          resolvedUrl: resolved.resolvedUrl,
+          canonicalUrl: resolved.canonicalUrl,
+          resolutionMethod: resolved.canonicalUrl !== resolved.resolvedUrl ? `${decoded.method}:canonical_meta` : `${decoded.method}:landed_url`,
+        })
+        resolutionCache.set(googleNewsUrl, structuredClone(finished))
+        return finished
+      }
+      addTraceStep(trace, 'decoded_url_failed_to_canonicalize', {
+        decodedUrl: decoded.decodedUrl,
+        resolutionMethod: decoded.method,
+      })
     }
-    addTraceStep(trace, 'decoded_url_failed_to_canonicalize', {
-      decodedUrl: decoded.decodedUrl,
-      resolutionMethod: decoded.method,
-    })
   } else if (decoded.failureReason) {
     addTraceStep(trace, 'google_decode_failed', {
       failureReason: decoded.failureReason,
@@ -1041,27 +1078,9 @@ async function resolveOriginalArticleUrl({ googleNewsUrl, title, source, sourceU
     })
   }
 
-  const bingResolved = await resolveViaBingNewsSearch({ title, source, sourceUrl, trace })
-  if (bingResolved) {
-    const finished = finishResolved(trace, {
-      resolvedUrl: bingResolved.resolvedUrl,
-      canonicalUrl: bingResolved.canonicalUrl,
-      resolutionMethod: bingResolved.canonicalUrl !== bingResolved.resolvedUrl ? 'bing_news_search:canonical_meta' : 'bing_news_search:landed_url',
-    })
-    resolutionCache.set(googleNewsUrl, structuredClone(finished))
-    return finished
-  }
-
-  const bingWebResolved = await resolveViaBingWebSearch({ title, source, sourceUrl, trace })
-  if (bingWebResolved) {
-    const finished = finishResolved(trace, {
-      resolvedUrl: bingWebResolved.resolvedUrl,
-      canonicalUrl: bingWebResolved.canonicalUrl,
-      resolutionMethod: bingWebResolved.canonicalUrl !== bingWebResolved.resolvedUrl ? 'bing_web_search:canonical_meta' : 'bing_web_search:landed_url',
-    })
-    resolutionCache.set(googleNewsUrl, structuredClone(finished))
-    return finished
-  }
+  addTraceStep(trace, 'google_only_resolution_exhausted', {
+    reason: 'google_decode_and_wrapper_validation_failed',
+  })
 
   const finished = finishUnresolved(trace, 'publisher_url_unresolved')
   resolutionCache.set(googleNewsUrl, structuredClone(finished))
@@ -1114,4 +1133,14 @@ export async function fetchGoogleNewsArticles(query, recencyFilter) {
   }
 
   return enriched
+}
+
+export const __testHooks = {
+  resolveOriginalArticleUrl,
+  resetCaches() {
+    resolutionCache.clear()
+    publisherFetchCache.clear()
+    nextGoogleDecodeRequestAt = 0
+    googleBatchDecodeBlockedUntil = 0
+  },
 }

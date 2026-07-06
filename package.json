@@ -9,7 +9,8 @@
     "dev:server": "nodemon server/server.js",
     "dev:frontend": "npm --prefix frontend run dev",
     "build": "npm --prefix frontend run build",
-    "start": "node server/server.js"
+    "start": "node server/server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",

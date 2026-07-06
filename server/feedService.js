@@ -60,6 +60,7 @@ seedStarterTemplateIfEmpty(DEFAULT_TEMPLATE)
 
 const SCHEDULED_REFRESH_INTERVALS = new Set([5, 10, 15, 30, 60])
 const ALLOWED_REFRESH_INTERVALS = new Set([0, 5, 10, 15, 30, 60])
+const ALLOWED_TOPIC_FRESHNESS = new Set(['when:1d', 'when:3d', 'when:7d', 'when:30d'])
 
 export function defaultTemplate() {
   const categories = db.prepare(`
@@ -161,25 +162,51 @@ function getDefaultRefreshIntervalMinutes() {
   return ALLOWED_REFRESH_INTERVALS.has(parsed) ? parsed : 15
 }
 
+function normalizeTopicFreshness(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return ALLOWED_TOPIC_FRESHNESS.has(normalized) ? normalized : 'when:7d'
+}
+
+function topicFreshnessLabel(value) {
+  const normalized = normalizeTopicFreshness(value)
+  if (normalized === 'when:1d') return '24 hours'
+  if (normalized === 'when:3d') return '3 days'
+  if (normalized === 'when:30d') return '30 days'
+  return '7 days'
+}
+
+function getDefaultTopicFreshness() {
+  return normalizeTopicFreshness(getAppSetting('default_topic_freshness'))
+}
+
 export function getSettings() {
   const defaultRefreshIntervalMinutes = getDefaultRefreshIntervalMinutes()
+  const defaultTopicFreshness = getDefaultTopicFreshness()
   return {
     default_refresh_interval_minutes: defaultRefreshIntervalMinutes,
     default_refresh_interval_label: intervalLabel(defaultRefreshIntervalMinutes),
+    default_topic_freshness: defaultTopicFreshness,
+    default_topic_freshness_label: topicFreshnessLabel(defaultTopicFreshness),
   }
 }
 
-export function updateSettings({ defaultRefreshIntervalMinutes }) {
+export function updateSettings({ defaultRefreshIntervalMinutes, defaultTopicFreshness }) {
   const parsed = parseRefreshIntervalMinutes(defaultRefreshIntervalMinutes)
   if (!ALLOWED_REFRESH_INTERVALS.has(parsed)) {
     throw new Error('Default refresh interval must be 5, 10, 15, 30, 60, or Manual')
   }
+  const normalizedFreshness = normalizeTopicFreshness(defaultTopicFreshness)
   const now = nowIso()
   db.prepare(`
     INSERT INTO app_settings (key, value, updated_at)
     VALUES ('default_refresh_interval_minutes', ?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
   `).run(String(parsed), now)
+  db.prepare(`
+    INSERT INTO app_settings (key, value, updated_at)
+    VALUES ('default_topic_freshness', ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `).run(normalizedFreshness, now)
   return getSettings()
 }
 
@@ -193,6 +220,179 @@ function saveAppSetting(key, value) {
 
 function getAppSetting(key) {
   return db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key)?.value || null
+}
+
+function normalizeChipList(values) {
+  const input = Array.isArray(values) ? values : []
+  const seen = new Set()
+  const output = []
+  for (const value of input) {
+    const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+    if (!normalized) continue
+    const key = normalized.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    output.push(normalized)
+  }
+  return output
+}
+
+function parseLegacyQueryTerms(expression = '') {
+  const terms = []
+  const pattern = /"([^"]+)"|(\S+)/g
+  let match
+  while ((match = pattern.exec(String(expression || ''))) !== null) {
+    const raw = String(match[1] || match[2] || '').trim()
+    if (!raw) continue
+    if (/^(OR|AND|NOT)$/i.test(raw)) continue
+    if (/^when:\d+d$/i.test(raw)) continue
+    const normalized = raw.replace(/^[()+]+|[()+]+$/g, '').trim()
+    if (!normalized || normalized.startsWith('-')) continue
+    if (terms.some((entry) => entry.toLowerCase() === normalized.toLowerCase())) continue
+    terms.push(normalized)
+  }
+  return terms
+}
+
+function quoteQueryTerm(term) {
+  const normalized = String(term || '').trim()
+  if (!normalized) return ''
+  return /\s/.test(normalized) ? `"${normalized}"` : normalized
+}
+
+function normalizeTopicDefinition(input = {}, { requireWatchTerms = false } = {}) {
+  const topic = {
+    watch_for: normalizeChipList(input.watch_for || input.watchFor || []),
+    ignore: normalizeChipList(input.ignore || []),
+    preferred_publishers: normalizeChipList(input.preferred_publishers || input.preferredPublishers || []),
+    avoid: normalizeChipList(input.avoid || []),
+  }
+  if (requireWatchTerms && topic.watch_for.length === 0) {
+    throw new Error('Watch for must include at least one term')
+  }
+  return topic
+}
+
+function generateTopicQuery(topicDefinition) {
+  const watchTerms = normalizeChipList(topicDefinition?.watch_for || [])
+  if (watchTerms.length === 0) throw new Error('Watch for must include at least one term')
+  const watchExpression = watchTerms.length === 1
+    ? quoteQueryTerm(watchTerms[0])
+    : `(${watchTerms.map(quoteQueryTerm).join(' OR ')})`
+  const ignoreExpression = normalizeChipList(topicDefinition?.ignore || [])
+    .map((term) => `-${quoteQueryTerm(term)}`)
+    .join(' ')
+  return [watchExpression, ignoreExpression].filter(Boolean).join(' ').trim()
+}
+
+function parseTopicConfigJson(value) {
+  if (!value) return null
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
+function inferTopicDefinitionFromSources(sources = []) {
+  const googleSources = sources.filter((source) => source.source_type === 'google_news_search')
+  const watch = []
+  const ignore = []
+  for (const source of googleSources) {
+    for (const term of parseLegacyQueryTerms(source.query || '')) {
+      if (watch.some((entry) => entry.toLowerCase() === term.toLowerCase())) continue
+      watch.push(term)
+    }
+    const negatives = String(source.query || '').match(/-"([^"]+)"|-(\S+)/g) || []
+    for (const raw of negatives) {
+      const term = String(raw || '').replace(/^-/, '').replace(/^"|"$/g, '').trim()
+      if (!term) continue
+      if (ignore.some((entry) => entry.toLowerCase() === term.toLowerCase())) continue
+      ignore.push(term)
+    }
+  }
+  return normalizeTopicDefinition({ watch_for: watch, ignore }, { requireWatchTerms: false })
+}
+
+function getCategoryTopicDefinition(category, sources = []) {
+  const saved = parseTopicConfigJson(category.topic_config_json)
+  if (saved) {
+    return {
+      ...normalizeTopicDefinition(saved, { requireWatchTerms: false }),
+      uses_legacy_sources: false,
+    }
+  }
+  return {
+    ...inferTopicDefinitionFromSources(sources),
+    uses_legacy_sources: true,
+  }
+}
+
+function effectiveClientTopicFreshness(client) {
+  return normalizeTopicFreshness(client?.topic_freshness_override || getDefaultTopicFreshness())
+}
+
+function syncCategoryExecutionSource(categoryId, topicDefinition, freshness) {
+  const normalizedTopic = normalizeTopicDefinition(topicDefinition, { requireWatchTerms: true })
+  const query = generateTopicQuery(normalizedTopic)
+  const normalizedFreshness = normalizeTopicFreshness(freshness)
+  const now = nowIso()
+  const normalized = normalizeSourceInput({
+    source_type: 'google_news_search',
+    query,
+    recency_filter: normalizedFreshness,
+  })
+
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM category_sources WHERE category_id = ?').run(categoryId)
+    db.prepare(`
+      INSERT INTO category_sources (category_id, source_type, config_json, enabled, sort_order, created_at, updated_at)
+      VALUES (?, ?, ?, 1, 0, ?, ?)
+    `).run(categoryId, normalized.source_type, JSON.stringify(normalized.config), now, now)
+    db.prepare(`
+      UPDATE categories
+      SET topic_config_json = ?, generated_query = ?, updated_at = ?
+      WHERE id = ?
+    `).run(JSON.stringify(normalizedTopic), query, now, categoryId)
+  })
+
+  tx()
+  return { topic: normalizedTopic, query, freshness: normalizedFreshness }
+}
+
+function matchesChip(text, chip) {
+  return String(text || '').toLowerCase().includes(String(chip || '').toLowerCase())
+}
+
+function applyTopicDefinitionToArticles(rows, topicDefinition) {
+  const normalizedTopic = normalizeTopicDefinition(topicDefinition, { requireWatchTerms: false })
+  const avoidPublishers = normalizedTopic.avoid
+  const ignoreTerms = normalizedTopic.ignore
+  const preferredPublishers = normalizedTopic.preferred_publishers
+
+  let ignoredCount = 0
+  const filtered = []
+  for (const row of rows) {
+    const text = [row.title, row.summary, row.source].filter(Boolean).join(' ')
+    const shouldIgnore = ignoreTerms.some((term) => matchesChip(text, term))
+      || avoidPublishers.some((publisher) => matchesChip(row.source, publisher))
+    if (shouldIgnore) {
+      ignoredCount += 1
+      continue
+    }
+    filtered.push(row)
+  }
+
+  filtered.sort((left, right) => {
+    const leftPreferred = preferredPublishers.some((publisher) => matchesChip(left.source, publisher)) ? 1 : 0
+    const rightPreferred = preferredPublishers.some((publisher) => matchesChip(right.source, publisher)) ? 1 : 0
+    if (leftPreferred !== rightPreferred) return rightPreferred - leftPreferred
+    const leftDate = new Date(left.publishedAt || left.discoveredAt).getTime()
+    const rightDate = new Date(right.publishedAt || right.discoveredAt).getTime()
+    return rightDate - leftDate
+  })
+
+  return { rows: filtered, ignoredCount }
 }
 
 function summarizeResolutionExample(article) {
@@ -373,6 +573,7 @@ function withClientShape(client) {
   const settings = getSettings()
   const useGlobalRefresh = Boolean(client.use_global_refresh)
   const effectiveRefreshIntervalMinutes = useGlobalRefresh ? settings.default_refresh_interval_minutes : normalizedInterval
+  const effectiveTopicFreshness = effectiveClientTopicFreshness(client)
   return {
     ...client,
     enabled: Boolean(client.enabled),
@@ -381,6 +582,9 @@ function withClientShape(client) {
     refresh_interval_label: useGlobalRefresh ? `Default (${settings.default_refresh_interval_label})` : intervalLabel(client.refresh_interval_minutes),
     effective_refresh_interval_minutes: effectiveRefreshIntervalMinutes,
     effective_refresh_interval_label: intervalLabel(effectiveRefreshIntervalMinutes),
+    topic_freshness_override: client.topic_freshness_override ? normalizeTopicFreshness(client.topic_freshness_override) : null,
+    effective_topic_freshness: effectiveTopicFreshness,
+    effective_topic_freshness_label: topicFreshnessLabel(effectiveTopicFreshness),
     feed_url: `/feeds/${client.slug}.xml`,
   }
 }
@@ -437,8 +641,11 @@ function nestClient(client) {
     ...withClientShape(client),
     categories: categories.map((category) => {
       const sources = loadSourcesForCategory(category.id)
+      const topicDefinition = getCategoryTopicDefinition(category, sources)
       return {
         ...category,
+        topic_definition: topicDefinition,
+        internal_query: category.generated_query || sources.find((source) => source.source_type === 'google_news_search')?.query || '',
         sources,
         queries: sources
           .filter((source) => source.source_type === 'google_news_search')
@@ -527,17 +734,18 @@ export function getClientBySlug(slug) {
   return client ? nestClient(client) : null
 }
 
-export function createClient({ name, slug, enabled = true, useTemplate = false, refreshIntervalMinutes, useGlobalRefresh = true }) {
+export function createClient({ name, slug, enabled = true, useTemplate = false, refreshIntervalMinutes, useGlobalRefresh = true, topicFreshnessOverride = null }) {
   const safeSlug = slugify(slug || name)
   if (!safeSlug) throw new Error('Client slug is required')
   const nextName = String(name || '').trim()
   if (!nextName) throw new Error('Client name is required')
   const now = nowIso()
   const parsedInterval = parseRefreshIntervalMinutes(refreshIntervalMinutes ?? getDefaultRefreshIntervalMinutes())
+  const normalizedTopicFreshnessOverride = topicFreshnessOverride ? normalizeTopicFreshness(topicFreshnessOverride) : null
   const info = db.prepare(`
-    INSERT INTO clients (name, slug, enabled, refresh_interval_minutes, use_global_refresh, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(nextName, safeSlug, enabled ? 1 : 0, parsedInterval, useGlobalRefresh ? 1 : 0, now, now)
+    INSERT INTO clients (name, slug, enabled, refresh_interval_minutes, use_global_refresh, topic_freshness_override, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(nextName, safeSlug, enabled ? 1 : 0, parsedInterval, useGlobalRefresh ? 1 : 0, normalizedTopicFreshnessOverride, now, now)
 
   if (useTemplate) {
     for (const templateCategory of defaultTemplate()) {
@@ -571,7 +779,7 @@ export function createClient({ name, slug, enabled = true, useTemplate = false, 
   return getClientDetail(info.lastInsertRowid)
 }
 
-export function updateClient(id, { name, slug, enabled, refreshIntervalMinutes, useGlobalRefresh }) {
+export function updateClient(id, { name, slug, enabled, refreshIntervalMinutes, useGlobalRefresh, topicFreshnessOverride }) {
   const existing = db.prepare('SELECT * FROM clients WHERE id = ?').get(id)
   if (!existing) throw new Error('Client not found')
   const nextName = String(name ?? existing.name).trim()
@@ -584,12 +792,23 @@ export function updateClient(id, { name, slug, enabled, refreshIntervalMinutes, 
   const nextInterval = refreshIntervalMinutes === undefined
     ? (existing.refresh_interval_minutes === null ? null : Number(existing.refresh_interval_minutes))
     : parseRefreshIntervalMinutes(refreshIntervalMinutes)
+  const nextTopicFreshnessOverride = topicFreshnessOverride === undefined
+    ? existing.topic_freshness_override
+    : (topicFreshnessOverride ? normalizeTopicFreshness(topicFreshnessOverride) : null)
 
   db.prepare(`
     UPDATE clients
-    SET name = ?, slug = ?, enabled = ?, refresh_interval_minutes = ?, use_global_refresh = ?, updated_at = ?
+    SET name = ?, slug = ?, enabled = ?, refresh_interval_minutes = ?, use_global_refresh = ?, topic_freshness_override = ?, updated_at = ?
     WHERE id = ?
-  `).run(nextName, nextSlug, nextEnabled ? 1 : 0, nextInterval, nextUseGlobalRefresh ? 1 : 0, now, id)
+  `).run(nextName, nextSlug, nextEnabled ? 1 : 0, nextInterval, nextUseGlobalRefresh ? 1 : 0, nextTopicFreshnessOverride, now, id)
+
+  const refreshedClient = getClientDetail(id)
+  const effectiveFreshness = effectiveClientTopicFreshness(refreshedClient)
+  for (const category of refreshedClient.categories) {
+    const topicDefinition = category.topic_definition
+    if (!topicDefinition?.watch_for?.length) continue
+    syncCategoryExecutionSource(category.id, topicDefinition, effectiveFreshness)
+  }
   return getClientDetail(id)
 }
 
@@ -597,33 +816,52 @@ export function deleteClient(id) {
   db.prepare('DELETE FROM clients WHERE id = ?').run(id)
 }
 
-export function createCategory(clientId, { name, maxItems = 5 }) {
-  const client = db.prepare('SELECT id FROM clients WHERE id = ?').get(clientId)
+export function createCategory(clientId, { name, maxItems = 5, watchFor = [], ignore = [], preferredPublishers = [], avoid = [], sortOrder }) {
+  const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId)
   if (!client) throw new Error('Client not found')
+  const trimmedName = String(name || '').trim()
+  if (!trimmedName) throw new Error('Topic name is required')
   const now = nowIso()
   const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS max_sort FROM categories WHERE client_id = ?').get(clientId)
+  const nextSortOrder = sortOrder === undefined ? Number(maxOrder.max_sort) + 1 : (Number(sortOrder) || 0)
   const info = db.prepare(`
     INSERT INTO categories (client_id, name, max_items, sort_order, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(clientId, name.trim(), Number(maxItems) || 5, Number(maxOrder.max_sort) + 1, now, now)
-  return db.prepare('SELECT * FROM categories WHERE id = ?').get(info.lastInsertRowid)
+  `).run(clientId, trimmedName, Number(maxItems) || 5, nextSortOrder, now, now)
+
+  syncCategoryExecutionSource(info.lastInsertRowid, {
+    watch_for: watchFor,
+    ignore,
+    preferred_publishers: preferredPublishers,
+    avoid,
+  }, effectiveClientTopicFreshness(client))
+
+  return getClientDetail(clientId).categories.find((category) => category.id === info.lastInsertRowid)
 }
 
-export function updateCategory(id, { name, maxItems, sortOrder }) {
+export function updateCategory(id, { name, maxItems, sortOrder, watchFor, ignore, preferredPublishers, avoid }) {
   const existing = db.prepare('SELECT * FROM categories WHERE id = ?').get(id)
   if (!existing) throw new Error('Category not found')
+  const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(existing.client_id)
+  const nextName = String(name ?? existing.name).trim()
+  if (!nextName) throw new Error('Topic name is required')
+  const nextMaxItems = Number(maxItems ?? existing.max_items) || 5
+  const nextSortOrder = Number(sortOrder ?? existing.sort_order) || 0
   db.prepare(`
     UPDATE categories
     SET name = ?, max_items = ?, sort_order = ?, updated_at = ?
     WHERE id = ?
-  `).run(
-    String(name ?? existing.name).trim(),
-    Number(maxItems ?? existing.max_items) || 5,
-    Number(sortOrder ?? existing.sort_order) || 0,
-    nowIso(),
-    id,
-  )
-  return db.prepare('SELECT * FROM categories WHERE id = ?').get(id)
+  `).run(nextName, nextMaxItems, nextSortOrder, nowIso(), id)
+
+  const existingDefinition = getCategoryTopicDefinition(existing, loadSourcesForCategory(id))
+  syncCategoryExecutionSource(id, {
+    watch_for: watchFor ?? existingDefinition.watch_for,
+    ignore: ignore ?? existingDefinition.ignore,
+    preferred_publishers: preferredPublishers ?? existingDefinition.preferred_publishers,
+    avoid: avoid ?? existingDefinition.avoid,
+  }, effectiveClientTopicFreshness(client))
+
+  return getClientDetail(existing.client_id).categories.find((category) => category.id === id)
 }
 
 export function deleteCategory(id) {
@@ -875,7 +1113,7 @@ function dedupeArticles(rows) {
   return { kept, duplicates }
 }
 
-export async function refreshClient(clientId) {
+export async function refreshClient(clientId, options = {}) {
   const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId)
   if (!client) throw new Error('Client not found')
   if (!client.enabled) throw new Error('Client is disabled')
@@ -894,6 +1132,7 @@ export async function refreshClient(clientId) {
     resolved: 0,
     skipped_unresolved: 0,
     skipped_duplicates: 0,
+    ignored_total: 0,
     final_emitted: 0,
     categories: [],
     resolved_examples: [],
@@ -903,14 +1142,18 @@ export async function refreshClient(clientId) {
   const collected = []
   const sourceStates = []
   for (const category of categories) {
+    const categoryStartedAt = Date.now()
     const sources = loadSourcesForCategory(category.id)
+    const topicDefinition = getCategoryTopicDefinition(category, sources)
     const categorySummary = {
       category_id: category.id,
       category_name: category.name,
+      topic_definition: topicDefinition,
       total_fetched: 0,
       resolved: 0,
       skipped_unresolved: 0,
       skipped_duplicates: 0,
+      ignored_count: 0,
       final_emitted: 0,
       sources: [],
       queries: [],
@@ -1058,10 +1301,17 @@ export async function refreshClient(clientId) {
     const categoryDeduped = dedupeArticles(categoryArticles)
     summary.skipped_duplicates += categoryDeduped.duplicates
     categorySummary.skipped_duplicates += categoryDeduped.duplicates
-    const finalCategoryArticles = categoryDeduped.kept.slice(0, category.max_items)
+    const curatedCategory = applyTopicDefinitionToArticles(categoryDeduped.kept, topicDefinition)
+    summary.ignored_total += curatedCategory.ignoredCount
+    categorySummary.ignored_count = curatedCategory.ignoredCount
+    const finalCategoryArticles = curatedCategory.rows.slice(0, category.max_items)
     categorySummary.final_emitted = finalCategoryArticles.length
+    categorySummary.duration_ms = Date.now() - categoryStartedAt
     collected.push(...finalCategoryArticles)
     summary.categories.push(categorySummary)
+    if (typeof options.onCategoryComplete === 'function') {
+      options.onCategoryComplete(categorySummary, summary)
+    }
   }
 
   const globalDeduped = dedupeArticles(collected)
@@ -1098,7 +1348,14 @@ export async function refreshClient(clientId) {
     throw error
   }
 
-  return getClientDetail(clientId)
+  const refreshedClient = getClientDetail(clientId)
+  if (options.withSummary) {
+    return {
+      client: refreshedClient,
+      refresh_summary: summary,
+    }
+  }
+  return refreshedClient
 }
 
 export async function refreshAllEnabledClients() {

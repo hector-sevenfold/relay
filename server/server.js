@@ -43,6 +43,32 @@ const buildCommit = process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GITHUB_SHA
 const buildVersion = process.env.APP_VERSION || packageJson.version || null
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const frontendDist = path.join(__dirname, '..', 'frontend', 'dist')
+const refreshJobs = new Map()
+
+function createRefreshJob(clientDetail) {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const topics = (clientDetail?.categories || []).map((category) => ({
+    id: category.id,
+    name: category.name,
+    status: 'pending',
+    fetched: 0,
+    emitted: 0,
+    ignored_count: 0,
+  }))
+  if (topics[0]) topics[0].status = 'running'
+  const job = {
+    id,
+    client_id: clientDetail.id,
+    client_name: clientDetail.name,
+    status: 'running',
+    started_at: new Date().toISOString(),
+    topics,
+    summary: null,
+    error: null,
+  }
+  refreshJobs.set(id, job)
+  return job
+}
 
 function passwordsMatch(candidate, expected) {
   const left = Buffer.from(String(candidate || ''), 'utf8')
@@ -177,6 +203,55 @@ app.post('/api/clients/:id/refresh', async (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error.message })
   }
+})
+
+app.post('/api/clients/:id/refresh-jobs', async (req, res) => {
+  const clientId = Number(req.params.id)
+  const clientDetail = getClientDetail(clientId)
+  if (!clientDetail) return res.status(404).json({ error: 'Client not found' })
+  const job = createRefreshJob(clientDetail)
+
+  refreshClient(clientId, {
+    withSummary: true,
+    onCategoryComplete(categorySummary) {
+      const currentIndex = job.topics.findIndex((topic) => topic.id === categorySummary.category_id)
+      if (currentIndex === -1) return
+      job.topics[currentIndex] = {
+        ...job.topics[currentIndex],
+        status: 'completed',
+        fetched: categorySummary.total_fetched,
+        emitted: categorySummary.final_emitted,
+        ignored_count: categorySummary.ignored_count || 0,
+      }
+      if (job.topics[currentIndex + 1]) {
+        job.topics[currentIndex + 1] = {
+          ...job.topics[currentIndex + 1],
+          status: 'running',
+        }
+      }
+    },
+  }).then((result) => {
+    job.status = 'completed'
+    job.finished_at = new Date().toISOString()
+    job.summary = result.refresh_summary
+    job.client = result.client
+  }).catch((error) => {
+    job.status = 'error'
+    job.finished_at = new Date().toISOString()
+    job.error = error.message
+    job.topics = job.topics.map((topic) => ({
+      ...topic,
+      status: topic.status === 'completed' ? 'completed' : 'error',
+    }))
+  })
+
+  res.status(202).json(job)
+})
+
+app.get('/api/refresh-jobs/:jobId', (req, res) => {
+  const job = refreshJobs.get(req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Refresh job not found' })
+  res.json(job)
 })
 
 app.post('/api/refresh-all', async (_req, res) => {
