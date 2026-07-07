@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api } from './api'
+import { getRefreshJobId, shouldPollRefreshJob } from './refreshJobs'
 
 const REFRESH_OPTIONS = [
   { value: 5, label: 'Every 5 minutes' },
@@ -476,10 +477,10 @@ export default function App() {
     }
   }, [selectedId])
 
-  const refreshJobId = refreshPanel?.id || refreshPanel?.jobId
+  const refreshJobId = getRefreshJobId(refreshPanel)
 
   useEffect(() => {
-    if (!refreshJobId || refreshPanel.status !== 'running') return undefined
+    if (!shouldPollRefreshJob(refreshPanel)) return undefined
     let cancelled = false
     const poll = async () => {
       try {
