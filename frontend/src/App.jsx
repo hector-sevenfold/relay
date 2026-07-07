@@ -166,14 +166,6 @@ function parseSearchTerms(expression = '') {
   return terms
 }
 
-function serializeSearchTerms(terms = []) {
-  return terms
-    .map((term) => String(term || '').trim())
-    .filter(Boolean)
-    .map((term) => (term.includes(' ') ? `"${term}"` : term))
-    .join(' ')
-}
-
 const TOPIC_FRESHNESS_OPTIONS = [
   { value: 'when:1d', label: '24 hours' },
   { value: 'when:3d', label: '3 days' },
@@ -407,10 +399,7 @@ export default function App() {
   const [toast, setToast] = useState(null)
   const [errorToast, setErrorToast] = useState(null)
   const [clientModal, setClientModal] = useState(null)
-  const [categoryModal, setCategoryModal] = useState(null)
-  const [searchModal, setSearchModal] = useState(null)
   const [sourceDebugModal, setSourceDebugModal] = useState(null)
-  const [expandedCategories, setExpandedCategories] = useState({})
   const [topicComposer, setTopicComposer] = useState(null)
   const [topicEditor, setTopicEditor] = useState(null)
   const [refreshPanel, setRefreshPanel] = useState(null)
@@ -527,13 +516,6 @@ export default function App() {
 
     const detail = await api.getClient(activeId)
     setSelectedClient(detail)
-    setExpandedCategories((current) => {
-      const next = { ...current }
-      for (const category of detail.categories) {
-        if (next[category.id] === undefined) next[category.id] = category.sort_order === 0
-      }
-      return next
-    })
   }
 
   async function handleSelectClient(id) {
@@ -543,13 +525,6 @@ export default function App() {
     try {
       const detail = await api.getClient(id)
       setSelectedClient(detail)
-      setExpandedCategories((current) => {
-        const next = { ...current }
-        for (const category of detail.categories) {
-          if (next[category.id] === undefined) next[category.id] = category.sort_order === 0
-        }
-        return next
-      })
     } catch (error) {
       showError(error.message)
     }
@@ -752,95 +727,6 @@ export default function App() {
       if (topicEditor?.id === categoryId) setTopicEditor(null)
       await loadClients(selectedClient.id)
       showToast('Topic deleted')
-    } catch (error) {
-      showError(error.message)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  function openCategoryModal(category = null) {
-    if (category) openTopicEditor(category)
-    else openTopicComposer()
-  }
-
-  async function handleSubmitCategory(event) {
-    if (categoryModal?.mode === 'create') return handleCreateTopic(event)
-    if (categoryModal?.mode === 'edit') return handleSaveTopicEditor(event)
-    event.preventDefault()
-  }
-
-  function openSearchModal() {}
-
-  function handleAddSearchTerm() {
-    setSearchModal((current) => {
-      if (!current) return current
-      const value = String(current.queryDraft || '').trim()
-      if (!value) return current
-      if ((current.queryTerms || []).includes(value)) {
-        return { ...current, queryDraft: '' }
-      }
-      const nextTerms = [...(current.queryTerms || []), value]
-      return {
-        ...current,
-        queryTerms: nextTerms,
-        queryDraft: '',
-        query: serializeSearchTerms(nextTerms),
-      }
-    })
-  }
-
-  function handleRemoveSearchTerm(termToRemove) {
-    setSearchModal((current) => {
-      if (!current) return current
-      const nextTerms = (current.queryTerms || []).filter((term) => term !== termToRemove)
-      return {
-        ...current,
-        queryTerms: nextTerms,
-        query: serializeSearchTerms(nextTerms),
-      }
-    })
-  }
-
-  async function handleSubmitSearch(event) {
-    event.preventDefault()
-    if (!selectedClient || !searchModal) return
-    setSaving(true)
-    try {
-      const normalizedQuery = searchModal.sourceType === 'google_news_search'
-        ? serializeSearchTerms(searchModal.queryTerms || [])
-        : searchModal.query
-      const payload = {
-        source_type: searchModal.sourceType,
-        enabled: searchModal.enabled,
-        sortOrder: Number(searchModal.sortOrder) || 0,
-        query: normalizedQuery,
-        recency_filter: searchModal.recencyFilter,
-        feed_url: searchModal.feedUrl,
-      }
-      if (searchModal.mode === 'create') {
-        await api.createSource(searchModal.categoryId, payload)
-        showToast('Source added')
-      } else {
-        await api.updateSource(searchModal.id, payload)
-        showToast('Source saved')
-      }
-      setSearchModal(null)
-      await loadClients(selectedClient.id)
-    } catch (error) {
-      showError(error.message)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function handleDeleteSearch(searchId) {
-    if (!window.confirm('Delete this source?')) return
-    setSaving(true)
-    try {
-      await api.deleteSource(searchId)
-      await loadClients(selectedClient.id)
-      showToast('Source deleted')
     } catch (error) {
       showError(error.message)
     } finally {
