@@ -140,6 +140,8 @@ ensureColumn('clients', 'use_global_refresh', 'INTEGER NOT NULL DEFAULT 0')
 ensureColumn('clients', 'topic_freshness_override', 'TEXT')
 ensureColumn('categories', 'topic_config_json', 'TEXT')
 ensureColumn('categories', 'generated_query', 'TEXT')
+ensureColumn('starter_template_categories', 'topic_config_json', 'TEXT')
+ensureColumn('starter_template_categories', 'generated_query', 'TEXT')
 ensureColumn('articles', 'summary', 'TEXT')
 ensureColumn('articles', 'discovery_source', 'TEXT')
 ensureColumn('category_sources', 'last_refresh_at', 'TEXT')
@@ -359,8 +361,8 @@ export function seedStarterTemplateIfEmpty(template) {
 
   const now = nowIso()
   const insertCategory = db.prepare(`
-    INSERT INTO starter_template_categories (name, max_items, sort_order, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO starter_template_categories (name, max_items, sort_order, topic_config_json, generated_query, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `)
   const insertQuery = db.prepare(`
     INSERT INTO starter_template_queries (category_id, query, recency_filter, enabled, sort_order, created_at, updated_at)
@@ -369,7 +371,15 @@ export function seedStarterTemplateIfEmpty(template) {
 
   const tx = db.transaction((rows) => {
     rows.forEach((category, categoryIndex) => {
-      const categoryInfo = insertCategory.run(category.name, category.max_items ?? 5, category.sort_order ?? categoryIndex, now, now)
+      const categoryInfo = insertCategory.run(
+        category.name,
+        category.max_items ?? 5,
+        category.sort_order ?? categoryIndex,
+        category.topic_definition ? JSON.stringify(category.topic_definition) : null,
+        category.generated_query || null,
+        now,
+        now,
+      )
       ;(category.queries || []).forEach((queryRow, queryIndex) => {
         const queryValue = typeof queryRow === 'string' ? queryRow : queryRow.query
         const recencyFilter = typeof queryRow === 'string' ? 'when:7d' : (queryRow.recency_filter || 'when:7d')

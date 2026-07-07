@@ -13,46 +13,56 @@ const DEFAULT_TEMPLATE = [
     name: 'Markets',
     max_items: 5,
     sort_order: 0,
-    queries: [
-      'bitcoin OR ethereum OR crypto market',
-      'BTC price OR ETH price',
-    ],
+    topic_definition: {
+      watch_for: ['bitcoin', 'ethereum', 'crypto market', 'BTC price', 'ETH price'],
+      ignore: [],
+      preferred_publishers: [],
+      avoid: [],
+    },
   },
   {
     name: 'Policy',
     max_items: 5,
     sort_order: 1,
-    queries: [
-      'crypto regulation OR stablecoin bill OR CLARITY Act',
-      'digital euro OR SEC crypto',
-    ],
+    topic_definition: {
+      watch_for: ['crypto regulation', 'stablecoin bill', 'CLARITY Act', 'digital euro', 'SEC crypto'],
+      ignore: [],
+      preferred_publishers: [],
+      avoid: [],
+    },
   },
   {
     name: 'Stablecoins',
     max_items: 5,
     sort_order: 2,
-    queries: [
-      'stablecoin payments OR USDC OR Tether',
-      'cross-border stablecoin OR payment stablecoins',
-    ],
+    topic_definition: {
+      watch_for: ['stablecoin payments', 'USDC', 'Tether', 'cross-border stablecoin', 'payment stablecoins'],
+      ignore: [],
+      preferred_publishers: [],
+      avoid: [],
+    },
   },
   {
     name: 'LatAm Crypto',
     max_items: 5,
     sort_order: 3,
-    queries: [
-      'Brazil crypto OR LatAm stablecoins',
-      'Brazil fintech OR Latin America crypto',
-    ],
+    topic_definition: {
+      watch_for: ['Brazil crypto', 'LatAm stablecoins', 'Brazil fintech', 'Latin America crypto'],
+      ignore: [],
+      preferred_publishers: [],
+      avoid: [],
+    },
   },
   {
     name: 'VC, Deals & M&A',
     max_items: 5,
     sort_order: 4,
-    queries: [
-      'crypto startup raises OR blockchain funding',
-      'crypto acquisition OR crypto M&A',
-    ],
+    topic_definition: {
+      watch_for: ['crypto startup raises', 'blockchain funding', 'crypto acquisition', 'crypto M&A'],
+      ignore: [],
+      preferred_publishers: [],
+      avoid: [],
+    },
   },
 ]
 
@@ -67,12 +77,8 @@ export function defaultTemplate() {
     SELECT * FROM starter_template_categories ORDER BY sort_order, id
   `).all()
 
-  return categories.map((category) => ({
-    id: category.id,
-    name: category.name,
-    max_items: category.max_items,
-    sort_order: category.sort_order,
-    queries: db.prepare(`
+  return categories.map((category) => {
+    const queries = db.prepare(`
       SELECT id, query, recency_filter, enabled, sort_order
       FROM starter_template_queries
       WHERE category_id = ?
@@ -83,8 +89,24 @@ export function defaultTemplate() {
       recency_filter: query.recency_filter,
       enabled: Boolean(query.enabled),
       sort_order: query.sort_order,
-    })),
-  }))
+    }))
+
+    const savedTopic = parseTopicConfigJson(category.topic_config_json)
+    const topicDefinition = savedTopic
+      ? normalizeTopicDefinition(savedTopic, { requireWatchTerms: false })
+      : normalizeTopicDefinition({
+        watch_for: queries.flatMap((query) => parseLegacyQueryTerms(query.query || '')),
+      }, { requireWatchTerms: false })
+
+    return {
+      id: category.id,
+      name: category.name,
+      max_items: category.max_items,
+      sort_order: category.sort_order,
+      topic_definition: topicDefinition,
+      generated_query: category.generated_query || (topicDefinition.watch_for.length ? generateTopicQuery(topicDefinition) : ''),
+    }
+  })
 }
 
 export function saveStarterTemplate(templateRows) {
@@ -96,28 +118,26 @@ export function saveStarterTemplate(templateRows) {
     const name = String(category.name || '').trim()
     if (!name) throw new Error(`Category ${categoryIndex + 1} needs a name`)
     const maxItems = Math.max(1, Number(category.max_items ?? category.maxItems ?? 5) || 5)
-    const queries = Array.isArray(category.queries) ? category.queries : []
+    const topicDefinition = normalizeTopicDefinition(category.topic_definition || category.topicDefinition || category, { requireWatchTerms: true })
     return {
       name,
       max_items: maxItems,
       sort_order: Number(category.sort_order ?? categoryIndex) || categoryIndex,
-      queries: queries.map((queryRow, queryIndex) => {
-        const query = String(queryRow.query || '').trim()
-        if (!query) throw new Error(`Search ${queryIndex + 1} in ${name} cannot be empty`)
-        return {
-          query,
-          recency_filter: String(queryRow.recency_filter || queryRow.recencyFilter || 'when:7d').trim() || 'when:7d',
-          enabled: queryRow.enabled === undefined ? true : Boolean(queryRow.enabled),
-          sort_order: Number(queryRow.sort_order ?? queryIndex) || queryIndex,
-        }
-      }),
+      topic_definition: topicDefinition,
+      generated_query: generateTopicQuery(topicDefinition),
+      queries: [{
+        query: generateTopicQuery(topicDefinition),
+        recency_filter: 'when:7d',
+        enabled: true,
+        sort_order: 0,
+      }],
     }
   })
 
   const now = nowIso()
   const insertCategory = db.prepare(`
-    INSERT INTO starter_template_categories (name, max_items, sort_order, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO starter_template_categories (name, max_items, sort_order, topic_config_json, generated_query, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `)
   const insertQuery = db.prepare(`
     INSERT INTO starter_template_queries (category_id, query, recency_filter, enabled, sort_order, created_at, updated_at)
@@ -129,7 +149,15 @@ export function saveStarterTemplate(templateRows) {
     db.prepare('DELETE FROM starter_template_categories').run()
 
     rows.forEach((category, categoryIndex) => {
-      const categoryInfo = insertCategory.run(category.name, category.max_items, category.sort_order ?? categoryIndex, now, now)
+      const categoryInfo = insertCategory.run(
+        category.name,
+        category.max_items,
+        category.sort_order ?? categoryIndex,
+        JSON.stringify(category.topic_definition),
+        category.generated_query,
+        now,
+        now,
+      )
       category.queries.forEach((queryRow, queryIndex) => {
         insertQuery.run(categoryInfo.lastInsertRowid, queryRow.query, queryRow.recency_filter, queryRow.enabled ? 1 : 0, queryRow.sort_order ?? queryIndex, now, now)
       })
@@ -145,12 +173,7 @@ export function resetStarterTemplate() {
     name: category.name,
     max_items: category.max_items,
     sort_order: category.sort_order ?? categoryIndex,
-    queries: (category.queries || []).map((query, queryIndex) => ({
-      query,
-      recency_filter: 'when:7d',
-      enabled: true,
-      sort_order: queryIndex,
-    })),
+    topic_definition: category.topic_definition,
   }))
   return saveStarterTemplate(rows)
 }
@@ -238,16 +261,20 @@ function normalizeChipList(values) {
 }
 
 function parseLegacyQueryTerms(expression = '') {
+  const sanitized = String(expression || '')
+    .replace(/when:\d+d/gi, ' ')
+    .replace(/-"[^"]+"|-(\S+)/g, ' ')
+    .trim()
+  if (!sanitized) return []
+
   const terms = []
-  const pattern = /"([^"]+)"|(\S+)/g
-  let match
-  while ((match = pattern.exec(String(expression || ''))) !== null) {
-    const raw = String(match[1] || match[2] || '').trim()
-    if (!raw) continue
-    if (/^(OR|AND|NOT)$/i.test(raw)) continue
-    if (/^when:\d+d$/i.test(raw)) continue
-    const normalized = raw.replace(/^[()+]+|[()+]+$/g, '').trim()
-    if (!normalized || normalized.startsWith('-')) continue
+  for (const chunk of sanitized.split(/\s+OR\s+/i)) {
+    const normalized = String(chunk || '')
+      .replace(/^[()+]+|[()+]+$/g, '')
+      .replace(/^"|"$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (!normalized) continue
     if (terms.some((entry) => entry.toLowerCase() === normalized.toLowerCase())) continue
     terms.push(normalized)
   }
@@ -754,25 +781,11 @@ export function createClient({ name, slug, enabled = true, useTemplate = false, 
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(info.lastInsertRowid, templateCategory.name, templateCategory.max_items, templateCategory.sort_order, now, now)
 
-      templateCategory.queries.forEach((queryRow, queryIndex) => {
-        const normalized = normalizeSourceInput({
-          source_type: 'google_news_search',
-          query: queryRow.query,
-          recency_filter: queryRow.recency_filter || 'when:7d',
-        })
-        db.prepare(`
-          INSERT INTO category_sources (category_id, source_type, config_json, enabled, sort_order, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          categoryInfo.lastInsertRowid,
-          normalized.source_type,
-          JSON.stringify(normalized.config),
-          queryRow.enabled ? 1 : 0,
-          queryIndex,
-          now,
-          now,
-        )
-      })
+      syncCategoryExecutionSource(
+        categoryInfo.lastInsertRowid,
+        templateCategory.topic_definition,
+        effectiveClientTopicFreshness({ topic_freshness_override: normalizedTopicFreshnessOverride }),
+      )
     }
   }
 

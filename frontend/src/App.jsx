@@ -14,7 +14,7 @@ const REFRESH_OPTIONS = [
 const NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'clients', label: 'Clients' },
-  { key: 'templates', label: 'Templates' },
+  { key: 'templates', label: 'Starter Topics' },
   { key: 'settings', label: 'Settings' },
 ]
 
@@ -75,39 +75,6 @@ function computeNextScheduledRefreshAt(client, now = new Date()) {
   return nextBoundary.toISOString()
 }
 
-function formatRecencyLabel(value) {
-  if (!value) return 'Past 7 days'
-  if (/^when:\d+d$/i.test(value)) {
-    const days = value.replace(/^when:/i, '').replace(/d$/i, '')
-    return `Past ${days} days`
-  }
-  return value
-}
-
-function formatSourceTypeLabel(type, sourceTypes = []) {
-  return sourceTypes.find((entry) => entry.type === type)?.label
-    || (type === 'google_news_search' ? 'Google News Search' : type === 'rss_feed' ? 'RSS Feed' : type)
-}
-
-function formatSourceConfig(source) {
-  if (!source) return ''
-  if (source.source_type === 'google_news_search') {
-    return `${source.query || ''}${source.recency_filter ? ` · ${formatRecencyLabel(source.recency_filter)}` : ''}`
-  }
-  return source.feed_url || ''
-}
-
-function formatSourceStatusLabel(status) {
-  if (status === 'healthy') return 'Healthy'
-  if (status === 'warning') return 'Warning'
-  if (status === 'error') return 'Error'
-  if (status === 'disabled') return 'Disabled'
-  if (!status) return 'Pending'
-  if (String(status).startsWith('ok')) return 'Healthy'
-  if (String(status).startsWith('error')) return 'Error'
-  return 'Warning'
-}
-
 function getStatusTone(status) {
   if (!status) return 'warning'
   if (status === 'healthy' || String(status).startsWith('ok')) return 'success'
@@ -136,34 +103,13 @@ function getCreatePayloadFromModal(clientModal) {
   }
 }
 
-function makeTemplateQuery(query = '', recencyFilter = 'when:7d', enabled = true) {
-  return {
-    id: `tmp-query-${Math.random().toString(36).slice(2, 10)}`,
-    query,
-    recency_filter: recencyFilter,
-    enabled,
-  }
-}
-
 function makeTemplateCategory(name = '', maxItems = 5) {
-  return {
+  return emptyTopicDraft({
     id: `tmp-category-${Math.random().toString(36).slice(2, 10)}`,
     name,
-    max_items: maxItems,
-    queries: [makeTemplateQuery()],
-  }
-}
-
-function parseSearchTerms(expression = '') {
-  const terms = []
-  const pattern = /"([^"]+)"|(\S+)/g
-  let match
-  while ((match = pattern.exec(expression)) !== null) {
-    const value = String(match[1] || match[2] || '').trim()
-    if (!value || terms.includes(value)) continue
-    terms.push(value)
-  }
-  return terms
+    maxItems: String(maxItems),
+    sortOrder: '0',
+  })
 }
 
 const TOPIC_FRESHNESS_OPTIONS = [
@@ -215,6 +161,16 @@ function topicDraftFromCategory(category) {
     avoid: uniqueChipList(topic.avoid || []),
     maxItems: String(category?.max_items || 5),
     sortOrder: String(category?.sort_order || 0),
+  })
+}
+
+function topicDraftFromTemplateCategory(category) {
+  return topicDraftFromCategory({
+    id: category?.id,
+    name: category?.name || '',
+    max_items: category?.max_items || category?.maxItems || 5,
+    sort_order: category?.sort_order || category?.sortOrder || 0,
+    topic_definition: category?.topic_definition || category?.topicDefinition || {},
   })
 }
 
@@ -383,7 +339,6 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null)
   const [selectedClient, setSelectedClient] = useState(null)
   const [settings, setSettings] = useState(null)
-  const [sourceTypes, setSourceTypes] = useState([])
   const [settingsFormValue, setSettingsFormValue] = useState('15')
   const [settingsFreshnessValue, setSettingsFreshnessValue] = useState('when:7d')
   const [template, setTemplate] = useState([])
@@ -399,7 +354,6 @@ export default function App() {
   const [toast, setToast] = useState(null)
   const [errorToast, setErrorToast] = useState(null)
   const [clientModal, setClientModal] = useState(null)
-  const [sourceDebugModal, setSourceDebugModal] = useState(null)
   const [topicComposer, setTopicComposer] = useState(null)
   const [topicEditor, setTopicEditor] = useState(null)
   const [refreshPanel, setRefreshPanel] = useState(null)
@@ -427,17 +381,15 @@ export default function App() {
   useEffect(() => {
     ;(async () => {
       try {
-        const [nextSettings, nextTemplate, nextSourceTypes, nextDashboard] = await Promise.all([
+        const [nextSettings, nextTemplate, nextDashboard] = await Promise.all([
           api.getSettings(),
           api.getTemplate(),
-          api.getSourceTypes(),
           api.getDashboard(),
         ])
         setSettings(nextSettings)
-        setSourceTypes(nextSourceTypes)
         setSettingsFormValue(String(nextSettings.default_refresh_interval_minutes))
         setSettingsFreshnessValue(nextSettings.default_topic_freshness || 'when:7d')
-        setTemplate(nextTemplate)
+        setTemplate(nextTemplate.map(topicDraftFromTemplateCategory))
         setTemplateDirty(false)
         setDashboard(nextDashboard)
         await loadClients()
@@ -773,56 +725,43 @@ export default function App() {
   }
 
   function handleTemplateCategoryChange(categoryId, field, value) {
-    updateTemplate((current) => current.map((category) => (
-      category.id === categoryId
-        ? { ...category, [field]: field === 'max_items' ? Math.max(1, Number(value) || 1) : value }
-        : category
-    )))
-  }
-
-  function handleTemplateQueryChange(categoryId, queryId, field, value) {
     updateTemplate((current) => current.map((category) => {
       if (category.id !== categoryId) return category
-      return {
-        ...category,
-        queries: category.queries.map((query) => (
-          query.id === queryId ? { ...query, [field]: value } : query
-        )),
+      if (field === 'maxItems') {
+        return { ...category, maxItems: String(Math.max(1, Number(value) || 1)) }
       }
+      return { ...category, [field]: value }
     }))
   }
 
   function handleAddTemplateCategory() {
-    updateTemplate((current) => [...current, makeTemplateCategory('', 5)])
+    updateTemplate((current) => [
+      ...current,
+      makeTemplateCategory('', 5),
+    ].map((category, index) => ({ ...category, sortOrder: String(index) })))
   }
 
   function handleDeleteTemplateCategory(categoryId) {
-    updateTemplate((current) => current.filter((category) => category.id !== categoryId))
-  }
-
-  function handleAddTemplateQuery(categoryId) {
-    updateTemplate((current) => current.map((category) => (
-      category.id === categoryId
-        ? { ...category, queries: [...category.queries, makeTemplateQuery()] }
-        : category
-    )))
-  }
-
-  function handleDeleteTemplateQuery(categoryId, queryId) {
-    updateTemplate((current) => current.map((category) => {
-      if (category.id !== categoryId) return category
-      return {
-        ...category,
-        queries: category.queries.filter((query) => query.id !== queryId),
-      }
-    }))
+    updateTemplate((current) => current
+      .filter((category) => category.id !== categoryId)
+      .map((category, index) => ({ ...category, sortOrder: String(index) })))
   }
 
   async function handleSaveTemplate() {
     setSavingTemplate(true)
     try {
-      const saved = await api.saveTemplate(template)
-      setTemplate(saved)
+      const saved = await api.saveTemplate(template.map((category, index) => ({
+        name: category.name,
+        max_items: Math.max(1, Number(category.maxItems) || 1),
+        sort_order: index,
+        topic_definition: {
+          watch_for: uniqueChipList(category.watchFor || []),
+          ignore: uniqueChipList(category.ignore || []),
+          preferred_publishers: uniqueChipList(category.preferredPublishers || []),
+          avoid: uniqueChipList(category.avoid || []),
+        },
+      })))
+      setTemplate(saved.map(topicDraftFromTemplateCategory))
       setTemplateDirty(false)
       showToast('Starter template saved')
     } catch (error) {
@@ -833,11 +772,11 @@ export default function App() {
   }
 
   async function handleResetTemplate() {
-    if (!window.confirm('Reset the starter template back to the default categories and searches?')) return
+    if (!window.confirm('Reset Starter Topics back to the default editorial topic set?')) return
     setSavingTemplate(true)
     try {
       const reset = await api.resetTemplate()
-      setTemplate(reset)
+      setTemplate(reset.map(topicDraftFromTemplateCategory))
       setTemplateDirty(false)
       showToast('Starter template reset')
     } catch (error) {
@@ -900,8 +839,7 @@ export default function App() {
 
       summary.totalClients += 1
       summary.activeFeeds += client.enabled ? 1 : 0
-      summary.categoryCount += client.category_count || 0
-      summary.sourceCount += client.source_count || 0
+      summary.topicCount += client.category_count || 0
       summary.cachedArticles += client.article_count || 0
       summary.failedFeeds += String(client.last_refresh_status || '').startsWith('error') ? 1 : 0
 
@@ -919,8 +857,7 @@ export default function App() {
         slug: client.slug,
         enabled: client.enabled,
         articleCount: client.article_count || 0,
-        categoryCount: client.category_count || 0,
-        sourceCount: client.source_count || 0,
+        topicCount: client.category_count || 0,
         lastRefreshStatus: client.last_refresh_status,
         lastRefreshedAt: client.last_refreshed_at,
         nextRefreshAt,
@@ -931,8 +868,7 @@ export default function App() {
     }, {
       totalClients: 0,
       activeFeeds: 0,
-      categoryCount: 0,
-      sourceCount: 0,
+      topicCount: 0,
       cachedArticles: 0,
       failedFeeds: 0,
       lastRefresh: null,
@@ -946,9 +882,9 @@ export default function App() {
       return right.localeCompare(left)
     })
 
-    totals.unhealthySources = dashboard.unhealthy_sources_count || 0
-    totals.zeroResultSources = dashboard.zero_result_source_count || 0
-    totals.recentFailedSources = (dashboard.recently_failed_sources || []).length
+    totals.retrievalIssues = dashboard.unhealthy_sources_count || 0
+    totals.zeroResultRuns = dashboard.zero_result_source_count || 0
+    totals.recentFailedRefreshes = (dashboard.recently_failed_sources || []).length
 
     return totals
   }, [clients, dashboard])
@@ -1050,7 +986,7 @@ export default function App() {
           <SectionHeading
             label="Topics"
             title="Teach Relay what belongs in the feed"
-            helper="Describe the editorial concepts once. Relay handles the Google News query generation underneath."
+            helper="Describe the editorial concepts once. Relay takes care of the monitoring logic behind the scenes."
             action={topicComposer ? null : (
               <button className="button button-secondary compact icon-text" type="button" onClick={openTopicComposer}>
                 <PlusIcon />
@@ -1144,7 +1080,7 @@ export default function App() {
                           <div className="preview-headline">{item.title}</div>
                         </div>
                         <div className="preview-meta-row">
-                          <span>{item.source || 'Unknown Source'}</span>
+                          <span>{item.source || 'Unknown Publisher'}</span>
                           <span>{formatDate(item.published_at)}</span>
                           <a href={item.canonical_url || item.url} target="_blank" rel="noopener noreferrer" className="external-link">
                             Open article
@@ -1270,7 +1206,7 @@ export default function App() {
         <header className="topbar">
           <div>
             <div className="breadcrumb">Dashboard</div>
-            <div className="topbar-meta">Operator view across refresh cadence, source health, and delivery readiness.</div>
+            <div className="topbar-meta">Monitoring health across clients, topics, and recent refresh activity.</div>
           </div>
           <div className="topbar-actions">
             <button className="button button-primary icon-text" type="button" onClick={() => setClientModal(emptyClientForm(settings?.default_refresh_interval_minutes ?? 15))}>
@@ -1282,19 +1218,19 @@ export default function App() {
 
         <section className="surface-card dashboard-hero">
           <div className="dashboard-hero-copy">
-            <div className="section-label">System brief</div>
-            <h1 className="dashboard-hero-title">Keep every client feed current, clean, and ready to syndicate.</h1>
-            <div className="dashboard-hero-meta">Relay monitors refresh cadence, cache health, and source reliability so you can move directly from exceptions to the workspace that needs attention.</div>
+            <div className="section-label">Relay</div>
+            <h1 className="dashboard-hero-title">Editorial monitoring for modern communications teams</h1>
+            <div className="dashboard-hero-meta">Track client monitoring health, review recent refresh activity, and move quickly into the workspace that needs attention.</div>
           </div>
           <div className="dashboard-hero-aside">
             <div className="hero-kpi-block">
-              <div className="hero-kpi-label">Active feeds</div>
+              <div className="hero-kpi-label">Active clients</div>
               <div className="hero-kpi-value">{dashboardStats.activeFeeds}</div>
-              <div className="hero-kpi-meta">{dashboardStats.totalClients} total clients in rotation</div>
+              <div className="hero-kpi-meta">{dashboardStats.totalClients} total clients in Relay</div>
             </div>
             <div className="hero-kpi-grid">
-              <StatCard label="Last refresh" value={formatDate(dashboardStats.lastRefresh)} meta="Most recent feed update" />
-              <StatCard label="Next refresh" value={formatDate(dashboardStats.nextRefresh)} meta="Earliest scheduled run" />
+              <StatCard label="Last refresh" value={formatDate(dashboardStats.lastRefresh)} meta="Most recent monitoring update" />
+              <StatCard label="Next refresh" value={formatDate(dashboardStats.nextRefresh)} meta="Earliest scheduled refresh" />
             </div>
           </div>
         </section>
@@ -1302,39 +1238,39 @@ export default function App() {
         <section className="dashboard-signals-grid">
           <DashboardSignalCard
             label="Coverage"
-            title={`${dashboardStats.totalClients} client feeds live in Relay`}
-            meta="A single view of operator coverage across workspaces, categories, and normalized sources."
+            title={`${dashboardStats.activeFeeds} active clients ready for monitoring`}
+            meta="A quick view of who is live, how many topics are monitored, and how much recent coverage is cached."
             stats={[
-              { label: 'Clients', value: dashboardStats.totalClients },
-              { label: 'Categories', value: dashboardStats.categoryCount },
-              { label: 'Sources', value: dashboardStats.sourceCount },
+              { label: 'Active clients', value: dashboardStats.activeFeeds },
+              { label: 'Topics monitored', value: dashboardStats.topicCount },
+              { label: 'Stories cached', value: dashboardStats.cachedArticles },
             ]}
           />
           <DashboardSignalCard
-            label="Cadence"
-            title={`${dashboardStats.cachedArticles} cached articles ready for downstream delivery`}
-            meta="Cache volume stays secondary to freshness. Use the timestamps below to judge whether the network is current enough to publish."
+            label="Refresh"
+            title="Recent refresh activity at a glance"
+            meta="Use these timestamps to see how current the monitoring network is and where coverage may be thinning out."
             stats={[
               { label: 'Last refresh', value: formatDate(dashboardStats.lastRefresh) },
               { label: 'Next refresh', value: formatDate(dashboardStats.nextRefresh) },
-              { label: 'Zero-result runs', value: dashboardStats.zeroResultSources },
+              { label: 'Recent quiet refreshes', value: dashboardStats.zeroResultRuns },
             ]}
           />
           <DashboardSignalCard
-            label="Exceptions"
-            title={dashboardStats.unhealthySources ? `${dashboardStats.unhealthySources} sources need attention` : 'No active source exceptions'}
-            meta={dashboardStats.unhealthySources ? 'Prioritize failures and degraded sources before they affect downstream feeds.' : 'All enabled sources are currently healthy.'}
-            tone={dashboardStats.unhealthySources ? 'warning' : 'calm'}
+            label="Review"
+            title={dashboardStats.retrievalIssues ? `${dashboardStats.retrievalIssues} topics needing review` : 'No topics need review right now'}
+            meta={dashboardStats.retrievalIssues ? 'Prioritize these clients first so monitoring stays current.' : 'All enabled client monitoring looks current.'}
+            tone={dashboardStats.retrievalIssues ? 'warning' : 'calm'}
             stats={[
-              { label: 'Unhealthy', value: dashboardStats.unhealthySources },
-              { label: 'Recent failures', value: dashboardStats.recentFailedSources },
-              { label: 'Failed feeds', value: dashboardStats.failedFeeds },
+              { label: 'Topics needing review', value: dashboardStats.retrievalIssues },
+              { label: 'Recent failures', value: dashboardStats.recentFailedRefreshes },
+              { label: 'Clients affected', value: dashboardStats.failedFeeds },
             ]}
           />
         </section>
 
         <section className="surface-card dashboard-card">
-          <SectionHeading label="Latest activity" title="Recently updated clients" helper="Start here when a client needs a closer read. Freshness, status, and feed actions stay on one surface." />
+          <SectionHeading label="Recent refresh activity" title="Recently updated clients" helper="Start here when a client needs a closer read. Monitoring health and feed actions stay on one surface." />
           <div className="dashboard-grid activity-grid">
             {dashboardStats.recentlyUpdated.length === 0 ? (
               <EmptyState compact title="No refresh activity yet" body="Run a client refresh to populate the system overview." />
@@ -1349,9 +1285,8 @@ export default function App() {
                 </div>
                 <div className="dashboard-client-meta">
                   <span>{client.enabled ? 'Enabled' : 'Disabled'}</span>
-                  <span>{client.categoryCount} categories</span>
-                  <span>{client.sourceCount} sources</span>
-                  <span>{client.articleCount} cached items</span>
+                  <span>{client.topicCount} topics</span>
+                  <span>{client.articleCount} cached stories</span>
                 </div>
                 <div className="dashboard-client-note">Last refresh {formatDate(client.lastRefreshedAt)} · Next refresh {formatDate(client.nextRefreshAt)}</div>
                 <div className="dashboard-client-actions">
@@ -1372,9 +1307,9 @@ export default function App() {
         </section>
 
         <section className="surface-card dashboard-card">
-          <SectionHeading label="Exceptions" title="Recently failed sources" helper="These source checks most recently returned an error during refresh." />
+          <SectionHeading label="Topics needing review" title="Recently failed topic refreshes" helper="These topics most recently ran into issues during refresh." />
           {(dashboard.recently_failed_sources || []).length === 0 ? (
-            <EmptyState compact title="No recent source failures" body="Failed Google News or RSS sources will appear here after a refresh run." />
+            <EmptyState compact title="No topics need review" body="If a topic runs into trouble during refresh, it will appear here." />
           ) : (
             <div className="source-failure-list">
               {dashboard.recently_failed_sources.map((source) => (
@@ -1382,15 +1317,15 @@ export default function App() {
                   <div className="source-failure-header">
                     <div>
                       <div className="dashboard-client-name">{source.client_name} · {source.category_name}</div>
-                      <div className="dashboard-client-slug">{formatSourceTypeLabel(source.source_type, sourceTypes)} · {source.source_label}</div>
+                      <div className="dashboard-client-slug">Recent refresh issue</div>
                     </div>
                     <div className="source-health-cell">
                       <StatusDot tone={getStatusTone(source.status)} />
-                      <span>{formatSourceStatusLabel(source.status)}</span>
+                      <span>{source.status === 'error' ? 'Failed' : source.status === 'warning' ? 'Warning' : 'Needs review'}</span>
                     </div>
                   </div>
                   <div className="dashboard-client-note">Last error {formatDate(source.last_error_at || source.last_refresh_at)}</div>
-                  <div className="source-error-inline">{source.last_error_message || 'Unknown source error'}</div>
+                  <div className="source-error-inline">{source.last_error_message || 'Unknown refresh issue'}</div>
                 </div>
               ))}
             </div>
@@ -1439,14 +1374,13 @@ export default function App() {
                 </div>
                 <div className="dashboard-client-meta">
                   <span>{client.enabled ? 'Enabled' : 'Disabled'}</span>
-                  <span>{client.category_count} categories</span>
-                  <span>{client.source_count} sources</span>
-                  <span>{client.article_count} cached items</span>
+                  <span>{client.category_count} topics</span>
+                  <span>{client.article_count} cached stories</span>
                 </div>
                 <div className="dashboard-client-note">Last refresh {formatDate(client.last_refreshed_at)} · Refresh cadence {client.effective_refresh_interval_label}</div>
                 <div className="dashboard-client-actions">
                   <button className="button button-secondary compact" type="button" onClick={() => handleSelectClient(client.id)}>
-                    Manage feed
+                    Open workspace
                   </button>
                   <button className="button button-secondary compact" type="button" onClick={() => copyToClipboard(`${window.location.origin}${client.feed_url}`, 'RSS URL copied')}>
                     <CopyIcon />
@@ -1466,79 +1400,68 @@ export default function App() {
       <>
         <header className="topbar">
           <div>
-            <div className="breadcrumb">Templates</div>
-            <div className="topbar-meta">Edit the starter categories and searches used when creating a new client with the template enabled.</div>
+            <div className="breadcrumb">Starter Topics</div>
+            <div className="topbar-meta">Reusable topic templates for new clients created with Starter Topics turned on.</div>
           </div>
           <div className="topbar-actions">
             <button className="button button-secondary" type="button" onClick={handleResetTemplate} disabled={savingTemplate}>
-              Reset to default
+              Reset Starter Topics
             </button>
             <button className="button button-primary" type="button" onClick={handleSaveTemplate} disabled={savingTemplate || !templateDirty}>
-              {savingTemplate ? 'Saving…' : 'Save template'}
+              {savingTemplate ? 'Saving…' : 'Save Starter Topics'}
             </button>
           </div>
         </header>
 
         <section className="surface-card template-card">
           <SectionHeading
-            label="Starter template"
-            title="Default categories and searches"
-            helper="Changes here are saved in SQLite and applied to every new client created with Use starter template enabled."
+            label="Starter Topics"
+            title="Reusable topics for new clients"
+            helper="Changes here are saved in SQLite and applied to every new client created with Starter Topics enabled."
             action={(
               <button className="button button-secondary compact" type="button" onClick={handleAddTemplateCategory}>
                 <PlusIcon />
-                Add category
+                Add topic
               </button>
             )}
           />
           <div className="template-grid editable">
             {template.length === 0 ? (
-              <EmptyState compact title="No starter categories" body="Add a category to define the default feed structure for new clients." />
-            ) : template.map((group) => (
-              <div className="template-group editable" key={group.id}>
-                <div className="template-group-header template-group-header-editable">
-                  <div className="template-group-fields">
-                    <label>
-                      <span className="field-label">Category</span>
-                      <input value={group.name} onChange={(event) => handleTemplateCategoryChange(group.id, 'name', event.target.value)} placeholder="Category name" />
-                    </label>
-                    <label className="template-max-items-field">
-                      <span className="field-label">Max Items</span>
-                      <input type="number" min="1" value={group.max_items} onChange={(event) => handleTemplateCategoryChange(group.id, 'max_items', event.target.value)} />
-                    </label>
-                  </div>
-                  <button className="icon-button danger" type="button" onClick={() => handleDeleteTemplateCategory(group.id)} aria-label={`Delete ${group.name || 'category'}`}>
-                    <TrashIcon />
-                  </button>
-                </div>
-                <div className="template-search-list editable">
-                  {group.queries.map((query) => (
-                    <div className="template-search-item editable" key={query.id}>
-                      <div className="template-search-row">
-                        <label className="template-query-field">
-                          <span className="field-label">Search</span>
-                          <input value={query.query} onChange={(event) => handleTemplateQueryChange(group.id, query.id, 'query', event.target.value)} placeholder="Google News search expression" />
-                        </label>
-                        <label className="template-recency-field">
-                          <span className="field-label">Default Recency</span>
-                          <input value={query.recency_filter} onChange={(event) => handleTemplateQueryChange(group.id, query.id, 'recency_filter', event.target.value)} placeholder="when:7d" />
-                        </label>
-                        <button className="icon-button danger template-delete-query" type="button" onClick={() => handleDeleteTemplateQuery(group.id, query.id)} aria-label="Delete search">
-                          <TrashIcon />
-                        </button>
-                      </div>
+              <EmptyState compact title="No starter topics" body="Add a topic to define the default editorial coverage for new clients." />
+            ) : template.map((group) => {
+              const templateSetter = (updater) => updateTemplate((current) => current.map((category) => {
+                if (category.id !== group.id) return category
+                return typeof updater === 'function' ? updater(category) : updater
+              }))
+              return (
+                <div className="template-group editable" key={group.id}>
+                  <div className="template-group-header template-group-header-editable">
+                    <div className="template-group-fields">
+                      <label>
+                        <span className="field-label">Topic</span>
+                        <input value={group.name} onChange={(event) => handleTemplateCategoryChange(group.id, 'name', event.target.value)} placeholder="Topic name" />
+                      </label>
+                      <label className="template-max-items-field">
+                        <span className="field-label">Maximum Stories</span>
+                        <input type="number" min="1" value={group.maxItems} onChange={(event) => handleTemplateCategoryChange(group.id, 'maxItems', event.target.value)} />
+                      </label>
                     </div>
-                  ))}
+                    <button className="icon-button danger" type="button" onClick={() => handleDeleteTemplateCategory(group.id)} aria-label={`Delete ${group.name || 'topic'}`}>
+                      <TrashIcon />
+                    </button>
+                  </div>
+                  <div className="topic-form-grid template-topic-fields">
+                    {renderTopicChipField(group, templateSetter, 'Watch for', 'watchFor', 'watchForDraft', 'Add a company, phrase, or concept')}
+                    {renderTopicChipField(group, templateSetter, 'Ignore', 'ignore', 'ignoreDraft', 'Add terms to exclude')}
+                    {renderTopicChipField(group, templateSetter, 'Preferred publishers', 'preferredPublishers', 'preferredPublishersDraft', 'Add a publisher to prioritize')}
+                    {renderTopicChipField(group, templateSetter, 'Avoid', 'avoid', 'avoidDraft', 'Add a publisher to avoid')}
+                  </div>
+                  <div className="template-group-footer">
+                    <div className="template-group-meta">These starter topics are reused whenever you create a client with Starter Topics enabled.</div>
+                  </div>
                 </div>
-                <div className="template-group-footer">
-                  <button className="button button-secondary compact" type="button" onClick={() => handleAddTemplateQuery(group.id)}>
-                    <PlusIcon />
-                    Add search
-                  </button>
-                  <div className="template-group-meta">{group.queries.length} searches configured</div>
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </section>
       </>
@@ -1551,7 +1474,7 @@ export default function App() {
         <header className="topbar">
           <div>
             <div className="breadcrumb">Settings</div>
-            <div className="topbar-meta">Global defaults for all client feeds.</div>
+            <div className="topbar-meta">Global monitoring defaults for every client workspace.</div>
           </div>
         </header>
 
@@ -1574,7 +1497,7 @@ export default function App() {
           </div>
 
           <div className="surface-card settings-card">
-            <SectionHeading label="Editorial model" title="Default freshness window" helper="Relay applies this freshness window when it generates Google News queries internally. Clients can optionally override it in Client Settings." />
+            <SectionHeading label="Editorial model" title="Default freshness window" helper="Relay uses this freshness window when deciding how recent stories should be. Clients can optionally override it in Client Settings." />
             <div className="settings-form-row">
               <label>
                 <span className="field-label">Global Default</span>
@@ -1590,7 +1513,7 @@ export default function App() {
           <div className="surface-card settings-note-card">
             <SectionHeading label="Behavior" title="Client overrides" />
             <div className="settings-note-list">
-              <div className="settings-note-item">Topic authors think in editorial concepts only. Relay owns the Google News query generation internally.</div>
+              <div className="settings-note-item">Topic authors work in editorial concepts only. Relay handles the monitoring logic behind the scenes.</div>
               <div className="settings-note-item">Client freshness override options: 24 hours, 3 days, 7 days, or 30 days.</div>
               <div className="settings-note-item">Refresh cadence remains separate from topic authoring.</div>
             </div>
@@ -1636,7 +1559,7 @@ export default function App() {
       {errorToast ? <div className="toast danger">✕ {errorToast}</div> : null}
 
       {clientModal ? (
-        <Modal title="Create client" subtitle="Set up a new client feed and optionally apply the starter template." onClose={() => setClientModal(null)}>
+        <Modal title="Create client" subtitle="Set up a new Relay workspace and optionally apply Starter Topics." onClose={() => setClientModal(null)}>
           <form className="modal-form" onSubmit={handleCreateClient}>
             <label>
               <span className="field-label">Client Name</span>
@@ -1668,7 +1591,7 @@ export default function App() {
             <div className="modal-switch-row">
               <div>
                 <div className="field-label">Starter Template</div>
-                <div className="field-help">Create Markets, Policy, Stablecoins, LatAm Crypto, and VC categories automatically.</div>
+                <div className="field-help">Create Markets, Policy, Stablecoins, LatAm Crypto, and VC topics automatically.</div>
               </div>
               <Switch checked={clientModal.useTemplate} onChange={(value) => setClientModal((current) => ({ ...current, useTemplate: value }))} ariaLabel="Toggle starter template" />
             </div>
@@ -1745,98 +1668,6 @@ export default function App() {
           </div>
           {refreshPanel.error ? <div className="source-error-inline">{refreshPanel.error}</div> : null}
         </div>
-      ) : null}
-      {sourceDebugModal ? (
-        <Modal
-          wide
-          title={`${sourceDebugModal.clientName} · ${sourceDebugModal.categoryName}`}
-          subtitle={`${formatSourceTypeLabel(sourceDebugModal.source.source_type, sourceTypes)} health and refresh details.`}
-          onClose={() => setSourceDebugModal(null)}
-        >
-          <div className="modal-form source-debug-layout">
-            <div className="source-debug-summary">
-              <div className="source-debug-block">
-                <div className="field-label">Source label</div>
-                <div className="source-debug-value">{formatSourceConfig(sourceDebugModal.source)}</div>
-              </div>
-              <div className="source-debug-grid">
-                <div className="source-debug-block"><div className="field-label">Status</div><div className="source-health-cell"><StatusDot tone={getStatusTone(sourceDebugModal.source.status || (sourceDebugModal.source.enabled ? null : 'disabled'))} /><span>{formatSourceStatusLabel(sourceDebugModal.source.status || (sourceDebugModal.source.enabled ? null : 'disabled'))}</span></div></div>
-                <div className="source-debug-block"><div className="field-label">Last refreshed</div><div className="source-debug-value">{formatDate(sourceDebugModal.source.last_refresh_at)}</div></div>
-                <div className="source-debug-block"><div className="field-label">Last success</div><div className="source-debug-value">{formatDate(sourceDebugModal.source.last_success_at)}</div></div>
-                <div className="source-debug-block"><div className="field-label">Last error</div><div className="source-debug-value">{sourceDebugModal.source.last_error_message ? `${formatDate(sourceDebugModal.source.last_error_at)} · ${sourceDebugModal.source.last_error_message}` : 'None'}</div></div>
-                <div className="source-debug-block"><div className="field-label">Items found</div><div className="source-debug-value">{sourceDebugModal.source.last_item_count || 0}</div></div>
-                <div className="source-debug-block"><div className="field-label">Resolved / skipped</div><div className="source-debug-value">{sourceDebugModal.source.last_resolved_count || 0} resolved · {sourceDebugModal.source.last_skipped_count || 0} skipped</div></div>
-              </div>
-            </div>
-
-            <div className="source-debug-columns">
-              <div className="source-debug-panel">
-                <div className="section-label">Latest refresh summary</div>
-                <div className="source-debug-list">
-                  <div>Fetched: {sourceDebugModal.source.last_refresh_summary?.fetched ?? sourceDebugModal.source.last_item_count ?? 0}</div>
-                  <div>Resolved: {sourceDebugModal.source.last_refresh_summary?.resolved ?? sourceDebugModal.source.last_resolved_count ?? 0}</div>
-                  <div>Skipped unresolved: {sourceDebugModal.source.last_refresh_summary?.skipped_unresolved ?? 0}</div>
-                  <div>Skipped duplicates: {sourceDebugModal.source.last_refresh_summary?.skipped_duplicates ?? 0}</div>
-                  <div>Emitted: {sourceDebugModal.source.last_refresh_summary?.emitted ?? 0}</div>
-                </div>
-              </div>
-
-              <div className="source-debug-panel">
-                <div className="section-label">Latest errors</div>
-                {(sourceDebugModal.source.last_refresh_summary?.latest_errors || []).length > 0 || sourceDebugModal.source.last_error_message ? (
-                  <div className="source-debug-list">
-                    {(sourceDebugModal.source.last_refresh_summary?.latest_errors || []).map((error, index) => (
-                      <div key={`${error.at || 'error'}-${index}`}>{formatDate(error.at)} · {error.message}</div>
-                    ))}
-                    {!(sourceDebugModal.source.last_refresh_summary?.latest_errors || []).length && sourceDebugModal.source.last_error_message ? <div>{formatDate(sourceDebugModal.source.last_error_at)} · {sourceDebugModal.source.last_error_message}</div> : null}
-                  </div>
-                ) : <EmptyState compact title="No recent errors" body="This source has not reported an error in its latest refresh summary." />}
-              </div>
-            </div>
-
-            <div className="source-debug-columns">
-              <div className="source-debug-panel">
-                <div className="section-label">Example articles returned</div>
-                {(sourceDebugModal.source.last_refresh_summary?.example_articles || []).length > 0 ? (
-                  <div className="source-debug-item-list">
-                    {sourceDebugModal.source.last_refresh_summary.example_articles.map((item, index) => (
-                      <div className="source-debug-item" key={`${item.url || item.title}-${index}`}>
-                        <div className="preview-headline">{item.title}</div>
-                        <div className="preview-meta-row">
-                          <span>{item.source || 'Unknown Source'}</span>
-                          <span>{formatDate(item.published_at)}</span>
-                          {item.url ? <a href={item.url} target="_blank" rel="noopener noreferrer" className="external-link">Open article</a> : null}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : <EmptyState compact title="No example articles" body="The latest run did not retain any example articles for this source." />}
-              </div>
-
-              <div className="source-debug-panel">
-                <div className="section-label">Skipped / unresolved examples</div>
-                {(sourceDebugModal.source.last_refresh_summary?.skipped_examples || []).length > 0 ? (
-                  <div className="source-debug-item-list">
-                    {sourceDebugModal.source.last_refresh_summary.skipped_examples.map((item, index) => (
-                      <div className="source-debug-item" key={`${item.raw_google_news_url || item.title}-${index}`}>
-                        <div className="preview-headline">{item.title}</div>
-                        <div className="preview-meta-row">
-                          <span>{item.source || 'Unknown Source'}</span>
-                          <span>{item.reason || 'Skipped'}</span>
-                        </div>
-                        <div className="search-secondary">{item.resolved_url || item.raw_google_news_url || item.canonical_url || 'No URL captured'}</div>
-                      </div>
-                    ))}
-                  </div>
-                ) : <EmptyState compact title="No skipped examples" body="The latest run did not capture unresolved or skipped examples for this source." />}
-              </div>
-            </div>
-
-            <div className="modal-actions">
-              <button className="button button-secondary" type="button" onClick={() => setSourceDebugModal(null)}>Close</button>
-            </div>
-          </div>
-        </Modal>
       ) : null}
     </div>
   )
