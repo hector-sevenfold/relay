@@ -956,6 +956,17 @@ export function deleteQuery(id) {
   deleteSource(id)
 }
 
+function formatRssPublishedDate(value) {
+  const date = value ? new Date(value) : null
+  if (!date || Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: 'UTC',
+  }).format(date)
+}
+
 function buildFeedItems(clientId) {
   return db.prepare(`
     SELECT a.*, cat.name AS category_name
@@ -963,13 +974,19 @@ function buildFeedItems(clientId) {
     JOIN categories cat ON cat.id = a.category_id
     WHERE a.client_id = ?
     ORDER BY COALESCE(a.published_at, a.discovered_at) DESC, a.id DESC
-  `).all(clientId).map((article) => ({
-    title: `[${article.category_name}] ${article.title} — ${article.source || 'Unknown Source'}`,
-    guid: article.canonical_url || article.url,
-    url: article.canonical_url || article.url,
-    date: article.published_at || article.discovered_at,
-    description: `Category: ${article.category_name}\nSource: ${article.source || 'Unknown Source'}\nPublished: ${article.published_at || ''}`,
-  }))
+  `).all(clientId).map((article) => {
+    const topic = article.category_name || 'General'
+    const publisher = article.source || 'Unknown Publisher'
+    const itemDate = article.published_at || article.discovered_at || new Date().toISOString()
+    return {
+      title: `[${topic}] ${article.title} — ${publisher}`,
+      guid: article.canonical_url || article.url,
+      url: article.canonical_url || article.url,
+      date: itemDate,
+      category: topic,
+      description: `Topic: ${topic}\nPublisher: ${publisher}\nPublished: ${formatRssPublishedDate(itemDate)}`,
+    }
+  })
 }
 
 export function buildRssXmlForClient(slug, baseUrl) {
@@ -983,9 +1000,9 @@ export function buildRssXmlForClient(slug, baseUrl) {
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<rss version="2.0">',
     '<channel>',
-    `<title>${escapeXml(`${client.name} News Feed`)}</title>`,
+    `<title>${escapeXml(`${client.name} Relay Feed`)}</title>`,
     `<link>${escapeXml(`${host}/feeds/${client.slug}.xml`)}</link>`,
-    `<description>${escapeXml(`Aggregated client feed for ${client.name}`)}</description>`,
+    `<description>${escapeXml(`Editorial monitoring feed for ${client.name}`)}</description>`,
     `<lastBuildDate>${escapeXml(new Date().toUTCString())}</lastBuildDate>`,
   ]
 
@@ -996,6 +1013,7 @@ export function buildRssXmlForClient(slug, baseUrl) {
     lines.push(`<guid>${escapeXml(item.guid)}</guid>`)
     lines.push(`<pubDate>${escapeXml(new Date(item.date).toUTCString())}</pubDate>`)
     lines.push(`<description>${escapeXml(item.description)}</description>`)
+    lines.push(`<category>${escapeXml(item.category)}</category>`)
     lines.push('</item>')
   }
 

@@ -199,6 +199,53 @@ Each enabled client exposes a public feed URL:
 
 These feed URLs do not require the admin password and are intended for downstream consumers like WordPress, Feedzy, or client portals.
 
+Relay publishes RSS 2.0 items with topic metadata so downstream tools can group stories by RSS category.
+
+Feed-level fields:
+- `title` = `{Client Name} Relay Feed`
+- `description` = `Editorial monitoring feed for {Client Name}`
+
+Per-item fields:
+- `title` in the format `[Topic] Headline — Publisher`
+- `link`
+- `guid`
+- `pubDate`
+- `description`
+- `category` = Topic name
+
+Example item shape:
+
+```xml
+<item>
+  <title>[Markets] Bitcoin clings to $62,500 as bears tighten grip — CoinDesk</title>
+  <link>https://www.coindesk.com/markets/2026/07/07/bitcoin-clings-to-62500-as-bears-tighten-grip/</link>
+  <guid>https://www.coindesk.com/markets/2026/07/07/bitcoin-clings-to-62500-as-bears-tighten-grip/</guid>
+  <pubDate>Tue, 07 Jul 2026 15:30:00 GMT</pubDate>
+  <description>Topic: Markets
+Publisher: CoinDesk
+Published: Jul 7, 2026</description>
+  <category>Markets</category>
+</item>
+```
+
+Sample grouped display in WordPress or a client portal after grouping by RSS `category`:
+
+```text
+Markets
+- Bitcoin clings to $62,500 as bears tighten grip — CoinDesk
+- Ether ETFs rebound as flows recover — Bloomberg
+
+Policy
+- Senate advances stablecoin oversight bill — Reuters
+- Treasury signals new enforcement guidance — The Block
+
+Stablecoins
+- Circle expands settlement network in LATAM — CoinDesk
+- Tether market share slips as competition rises — FT
+```
+
+Relay does not expose Google News queries, providers, source configuration, or debug metadata in the public feed.
+
 ## Deployment checklist
 
 Before shipping:
