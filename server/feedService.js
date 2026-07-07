@@ -979,7 +979,7 @@ function buildFeedItems(clientId) {
     const publisher = article.source || 'Unknown Publisher'
     const itemDate = article.published_at || article.discovered_at || new Date().toISOString()
     return {
-      title: `[${topic}] ${article.title} — ${publisher}`,
+      title: article.title,
       guid: article.canonical_url || article.url,
       url: article.canonical_url || article.url,
       date: itemDate,

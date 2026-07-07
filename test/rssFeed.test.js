@@ -144,14 +144,16 @@ test('public RSS feed is valid, categorized by topic, and not blocked by auth', 
     assert.equal(feed.rss.channel.link, `${baseUrl}/feeds/acme-capital.xml`)
 
     const item = Array.isArray(feed.rss.channel.item) ? feed.rss.channel.item[0] : feed.rss.channel.item
-    assert.equal(item.title, '[Markets] Bitcoin clings to $62,500 as bears tighten grip — CoinDesk')
+    assert.equal(item.title, 'Bitcoin clings to $62,500 as bears tighten grip')
+    assert.equal(item.category, 'Markets')
     assert.equal(item.link, 'https://www.coindesk.com/markets/2026/07/07/bitcoin-clings-to-62500-as-bears-tighten-grip/')
     assert.equal(item.guid, 'https://www.coindesk.com/markets/2026/07/07/bitcoin-clings-to-62500-as-bears-tighten-grip/')
-    assert.equal(item.category, 'Markets')
     assert.match(item.pubDate, /Tue, 07 Jul 2026 15:30:00 GMT/)
     assert.equal(item.description, 'Topic: Markets\nPublisher: CoinDesk\nPublished: Jul 7, 2026')
     assert.equal(feedXml.includes('google_news_search'), false)
     assert.equal(feedXml.includes('news.google.com/rss/articles/demo-story'), false)
+    assert.equal(feedXml.includes('CoinDesk</title>'), false)
+    assert.equal(feedXml.includes('[Markets]'), false)
 
     const missingResponse = await fetch(`${baseUrl}/feeds/missing-client.xml`)
     assert.equal(missingResponse.status, 404)
