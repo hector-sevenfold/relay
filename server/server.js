@@ -5,7 +5,7 @@ import packageJson from '../package.json' with { type: 'json' }
 import { fileURLToPath } from 'node:url'
 import { timingSafeEqual } from 'node:crypto'
 import {
-  buildRssXmlForClient,
+  buildRssFeedForClient,
   createCategory,
   createClient,
   createQuery,
@@ -19,11 +19,11 @@ import {
   getDashboardSummary,
   getLastRefreshDebug,
   getSettings,
+  isClientRefreshRunningBySlug,
   listAvailableSourceTypes,
   listClientsSummary,
   refreshAllEnabledClients,
   refreshClient,
-  refreshClientIfDueBySlug,
   refreshDueClients,
   resetStarterTemplate,
   saveStarterTemplate,
@@ -328,17 +328,37 @@ app.delete('/api/queries/:id', (req, res) => {
   res.status(204).end()
 })
 
-app.get('/feeds/:slug.xml', async (req, res) => {
+app.get('/feeds/:slug.xml', (req, res) => {
+  const startedAt = Date.now()
   const protocol = req.headers['x-forwarded-proto'] || req.protocol
   const host = req.headers.host
-  try {
-    await refreshClientIfDueBySlug(req.params.slug, new Date())
-  } catch (error) {
-    console.error(`Feed request refresh failed for ${req.params.slug}`, error)
+  const refreshRunning = isClientRefreshRunningBySlug(req.params.slug)
+
+  const feed = buildRssFeedForClient(req.params.slug, `${protocol}://${host}`)
+  if (!feed) {
+    const durationMs = Date.now() - startedAt
+    console.info(`[rss-feed-request] ${JSON.stringify({
+      slug: req.params.slug,
+      status_code: 404,
+      item_count: 0,
+      response_time_ms: durationMs,
+      refresh_running: refreshRunning,
+    })}`)
+    return res.status(404).send('Feed not found')
   }
-  const xml = buildRssXmlForClient(req.params.slug, `${protocol}://${host}`)
-  if (!xml) return res.status(404).send('Feed not found')
-  res.type('application/rss+xml').send(xml)
+
+  res.set('Content-Type', 'application/rss+xml; charset=utf-8')
+  res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=900')
+  res.send(feed.xml)
+
+  const durationMs = Date.now() - startedAt
+  console.info(`[rss-feed-request] ${JSON.stringify({
+    slug: req.params.slug,
+    status_code: 200,
+    item_count: feed.itemCount,
+    response_time_ms: durationMs,
+    refresh_running: refreshRunning,
+  })}`)
 })
 
 app.use(express.static(frontendDist))

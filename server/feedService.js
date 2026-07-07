@@ -989,7 +989,7 @@ function buildFeedItems(clientId) {
   })
 }
 
-export function buildRssXmlForClient(slug, baseUrl) {
+export function buildRssFeedForClient(slug, baseUrl) {
   const client = getClientBySlug(slug)
   if (!client) return null
 
@@ -1018,53 +1018,32 @@ export function buildRssXmlForClient(slug, baseUrl) {
   }
 
   lines.push('</channel>', '</rss>')
-  return lines.join('')
+  return {
+    client,
+    itemCount: items.length,
+    xml: lines.join(''),
+  }
 }
 
-const inFlightFeedRefreshes = new Map()
-
-function isClientDueForRefresh(client, now = new Date()) {
-  if (!client || !client.enabled) return false
-
-  const settings = getSettings()
-  const intervalMinutes = client.use_global_refresh
-    ? settings.default_refresh_interval_minutes
-    : Number(client.refresh_interval_minutes)
-
-  if (!SCHEDULED_REFRESH_INTERVALS.has(intervalMinutes)) return false
-
-  const alignedNow = new Date(now)
-  alignedNow.setSeconds(0, 0)
-
-  const currentMinute = alignedNow.getMinutes()
-  const scheduledBoundary = new Date(alignedNow)
-  scheduledBoundary.setMinutes(currentMinute - (currentMinute % intervalMinutes))
-
-  const lastMs = client.last_refreshed_at ? new Date(client.last_refreshed_at).getTime() : null
-  return !lastMs || Number.isNaN(lastMs) || lastMs < scheduledBoundary.getTime()
+export function buildRssXmlForClient(slug, baseUrl) {
+  return buildRssFeedForClient(slug, baseUrl)?.xml || null
 }
 
-export async function refreshClientIfDueBySlug(slug, now = new Date()) {
-  const client = db.prepare('SELECT * FROM clients WHERE slug = ? AND enabled = 1').get(slug)
-  if (!client) return { ok: false, reason: 'missing' }
-  if (!isClientDueForRefresh(client, now)) {
-    return { ok: true, refreshed: false, clientId: client.id, reason: 'not_due' }
-  }
+const activeClientRefreshCounts = new Map()
 
-  const existing = inFlightFeedRefreshes.get(client.id)
-  if (existing) {
-    await existing
-    return { ok: true, refreshed: false, clientId: client.id, reason: 'joined_inflight' }
-  }
+function trackClientRefreshStart(clientId) {
+  activeClientRefreshCounts.set(clientId, (activeClientRefreshCounts.get(clientId) || 0) + 1)
+}
 
-  const refreshPromise = refreshClient(client.id)
-    .then(() => ({ ok: true, refreshed: true, clientId: client.id }))
-    .finally(() => {
-      inFlightFeedRefreshes.delete(client.id)
-    })
+function trackClientRefreshEnd(clientId) {
+  const nextCount = (activeClientRefreshCounts.get(clientId) || 0) - 1
+  if (nextCount > 0) activeClientRefreshCounts.set(clientId, nextCount)
+  else activeClientRefreshCounts.delete(clientId)
+}
 
-  inFlightFeedRefreshes.set(client.id, refreshPromise)
-  return await refreshPromise
+export function isClientRefreshRunningBySlug(slug) {
+  const client = db.prepare('SELECT id FROM clients WHERE slug = ?').get(slug)
+  return Boolean(client && activeClientRefreshCounts.get(client.id))
 }
 
 function escapeXml(value) {
@@ -1149,7 +1128,9 @@ export async function refreshClient(clientId, options = {}) {
   if (!client) throw new Error('Client not found')
   if (!client.enabled) throw new Error('Client is disabled')
 
-  const categories = db.prepare(`
+  trackClientRefreshStart(clientId)
+  try {
+    const categories = db.prepare(`
     SELECT * FROM categories WHERE client_id = ? ORDER BY sort_order, id
   `).all(clientId)
 
@@ -1387,6 +1368,9 @@ export async function refreshClient(clientId, options = {}) {
     }
   }
   return refreshedClient
+  } finally {
+    trackClientRefreshEnd(clientId)
+  }
 }
 
 export async function refreshAllEnabledClients() {
